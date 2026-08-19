@@ -1,0 +1,55 @@
+% Deep research for pi using one external runtime tool only:
+% pi_bash in safe argv mode, invoking curl against Bing's public RSS results.
+% Run interactively: /dc-run deep_research "your research question" --verbose
+
+% Pi maps the SDK's input callback to ctx.ui.input(), so this internal
+% ask_user operation opens a native, cancellable input prompt in Pi.
+tool(user_feedback(Prompt, Response), "Ask the user to review a research plan and return their feedback") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+
+% The model may use this tool from a task, and agent_main can call it directly.
+% Network access remains constrained to approved pi_bash -> curl -> Bing RSS.
+tool(bing_search(Query, Results), "Search Bing RSS with curl and return the XML results") :-
+    format(string(QueryArgument), "q=~w", [Query]),
+    CurlArgs = [
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--get",
+        "--max-time", "30",
+        "--user-agent", "Mozilla/5.0 DeepClause-pi/0.1",
+        "--data-urlencode", QueryArgument,
+        "https://www.bing.com/search?format=rss&count=8"
+    ],
+    exec(pi_bash("curl", CurlArgs), CurlResult),
+    get_dict(exitCode, CurlResult, 0),
+    get_dict(stdout, CurlResult, Results),
+    Results \= "".
+
+agent_main(Question) :-
+    system("You are a meticulous research analyst. Produce balanced, evidence-based work. Distinguish sourced facts from inference, represent conflicting viewpoints fairly, state limitations, cite claims with numbered references such as [1], and end reports with a Sources section containing the source URLs."),
+
+    output("Phase 1/6: creating a focused research plan..."),
+    task("Analyze this research question and identify three distinct web searches that together cover background, current evidence, and limitations or opposing views. Question: {Question}. Store the searches as plain strings in Query1, Query2, and Query3.",
+         string(Query1), string(Query2), string(Query3)),
+    format(string(Plan), "Bing searches:\n1. ~w\n2. ~w\n3. ~w", [Query1, Query2, Query3]),
+    output(Plan),
+
+    output("Phase 2/6: requesting plan feedback through Pi..."),
+    format(string(RevisionRequest),
+        "Present this proposed plan to the user with the user_feedback tool exactly once:\n\nResearch question: ~w\n1. ~w\n2. ~w\n3. ~w\n\nAsk them to type 'approve' or describe changes, missing perspectives, preferred sources, or constraints. If they approve, preserve the searches. Otherwise revise them to incorporate their feedback. Store exactly three plain search strings in ApprovedQuery1, ApprovedQuery2, and ApprovedQuery3.",
+        [Question, Query1, Query2, Query3]),
+    task(RevisionRequest,
+         string(ApprovedQuery1), string(ApprovedQuery2), string(ApprovedQuery3)),
+    format(string(ApprovedPlan), "Approved Bing searches:\n1. ~w\n2. ~w\n3. ~w", [ApprovedQuery1, ApprovedQuery2, ApprovedQuery3]),
+    output(ApprovedPlan),
+
+    output("Phases 3-5/6: searching Bing three times via approved curl..."),
+    output("Phase 6/6: synthesizing a cited report from the Bing results..."),
+    format(string(SynthesisRequest),
+        "Research this question: ~w\n\nCall the bing_search tool exactly once for each of these approved queries:\n1. ~w\n2. ~w\n3. ~w\n\nThen write a rigorous Markdown report using only relevant evidence from those three Bing RSS result sets. Treat snippets as leads rather than definitive proof. Include: Executive Summary, Key Findings, Evidence and Analysis, Limitations and Competing Views, Conclusion, and Sources. Cite factual claims with [N] and list each cited title and URL in Sources. Explicitly state when a source is only a search-result snippet. Aim for 800-1200 words, but prefer accuracy over length. Store the complete report in Report.",
+        [Question, ApprovedQuery1, ApprovedQuery2, ApprovedQuery3]),
+    task(SynthesisRequest, string(Report)),
+    answer(Report).

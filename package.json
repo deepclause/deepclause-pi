@@ -1,0 +1,56 @@
+{
+  "name": "deepclause-pi",
+  "version": "0.1.0",
+  "description": "Pi-hosted runtime for DeepClause DML programs",
+  "type": "module",
+  "license": "MIT",
+  "author": "DeepClause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deepclause/deepclause-pi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/deepclause/deepclause-pi/issues"
+  },
+  "homepage": "https://github.com/deepclause/deepclause-pi#readme",
+  "keywords": [
+    "pi",
+    "deepclause",
+    "dml",
+    "prolog",
+    "agent",
+    "llm"
+  ],
+  "files": [
+    "dist",
+    "src"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "check": "npm run build && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "dependencies": {
+    "deepclause-sdk": "0.0.87"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
