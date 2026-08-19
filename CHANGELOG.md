@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2026-08-19
+
+- Fix Git installations resolving `deepclause-sdk` to a broken sibling symlink.
+- Lock the runtime dependency to the published `deepclause-sdk` 0.0.87 npm tarball.
+
 ## 0.1.0 - 2026-08-19
 
 - Add `/dc`, `/dc-list`, `/dc-run`, and `/dc-cancel`.

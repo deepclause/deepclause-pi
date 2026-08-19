@@ -1,6 +1,6 @@
 {
   "name": "deepclause-pi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi-hosted runtime for DeepClause DML programs",
   "type": "module",
   "license": "MIT",
@@ -37,7 +37,7 @@
     "prepublishOnly": "npm run check"
   },
   "dependencies": {
-    "deepclause-sdk": "0.0.87"
+    "deepclause-sdk": "npm:deepclause-sdk@0.0.87"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.84.0",

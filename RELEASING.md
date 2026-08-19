@@ -20,23 +20,17 @@ git push origin main --tags
 
 Confirm `npm view deepclause-sdk version` reports `0.0.87` before continuing.
 
-## 2. Finalize this repository
+## 2. Release the pi extension
 
 Once the SDK is available from npm:
 
 ```sh
-npm install
+npm ci
 npm run check
 git add .
-git commit -m "Initial deepclause-pi release"
-git tag v0.1.0
-```
-
-Create `deepclause/deepclause-pi` on GitHub, then push:
-
-```sh
-git remote add origin git@github.com:deepclause/deepclause-pi.git
-git push -u origin main --tags
+git commit -m "Fix SDK dependency for Git installs"
+git tag v0.1.1
+git push origin main --tags
 ```
 
 Users can then install the extension with:
