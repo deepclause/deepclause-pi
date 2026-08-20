@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.2 - 2026-08-20
+
+- Add the model-callable `dc_run` tool for executing existing DML programs.
+- Keep `dc_run` disabled by default and add `/dc-tool enable|disable|status` for per-workspace control.
+- Apply the existing DML path isolation, context modes, cancellation, runtime-tool whitelist, and bash approval policy to model-triggered runs.
+- Reject concurrent DeepClause execution and return structured answers, errors, usage, and live progress to pi.
+- Replace the minimal seeded authoring notes with a comprehensive pi-specific DML guide grounded in the SDK runtime, prompts, examples, and planning benchmarks.
+- Document reliable architecture patterns and application ideas for research, constrained planning, engineering, compliance, expert systems, and data workflows.
+- Add `/dc-plan`, which uses a normal pi turn and transaction-scoped `dc_plan_commit` tool to create typed executable plans.
+- Deterministically assemble, validate, preview, and non-destructively write generated DML under `.pi/deepclause/plans/`.
+- Add bounded `pi_agent_step` delegation so user-run plans can use pi's current context, loaded skills, and exact active built-in or extension tools while preserving their policies and approvals.
+- Restore pi's previous active tools after delegated success, failure, or cancellation, and reject recursive DeepClause control tools.
+- Require explicit confirmation for contextual plan execution and reject contextual plans invoked through model-callable `dc_run`.
+
 ## 0.1.1 - 2026-08-19
 
 - Fix Git installations resolving `deepclause-sdk` to a broken sibling symlink.

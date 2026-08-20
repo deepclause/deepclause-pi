@@ -29,6 +29,8 @@ pi install git:github.com/deepclause/deepclause-pi -l
 
 Restart pi after installation. Run `/dc` to initialize the current workspace and verify the active model and runtime status.
 
+For a project-local (`-l`) installation, start pi from the directory containing `.pi/settings.json`. Pi does not discover a project package from a parent directory when launched inside a nested subdirectory. The startup screen should list DeepClause under **Extensions** and `/dc-run` should appear in slash-command completion. If the extension is absent, an input beginning with `/dc-run` is forwarded to the model as ordinary text instead of executing the command.
+
 To try an unpublished checkout during development:
 
 ```sh
@@ -40,9 +42,11 @@ pi -e ./deepclause-pi/src/index.ts
 | Command | Description |
 | --- | --- |
 | `/dc` | Initialize the workspace non-destructively and show help, model, paths, and status. |
-| `/dc-list` | List DML programs under `.pi/deepclause/skills/`. |
+| `/dc-list` | List authored skills and generated plans. |
+| `/dc-plan <request> [--name=slug]` | Create a validated executable DML plan using pi's current context, skills, and active tools. |
 | `/dc-run <skill> [args]` | Run a named skill such as `example` or `deep_research`. |
 | `/dc-run <path> [args]` | Run a DML file below `.pi/deepclause/`. |
+| `/dc-tool enable\|disable\|status` | Control the default-off `dc_run` tool callable by pi's model. |
 | `/dc-cancel` | Cancel the active DeepClause execution. |
 
 Run options:
@@ -57,6 +61,8 @@ Examples:
 /dc-run example --debug
 /dc-run deep_research "What are the practical impacts of small language models?" --verbose
 /dc-run skills/my_skill.dml "first argument" --context=isolated
+/dc-plan inspect this repository and propose a safe ESM migration --name=esm-migration
+/dc-run plans/esm_migration.dml
 ```
 
 ## Workspace layout
@@ -68,14 +74,15 @@ The first `/dc` or `/dc-run` creates missing files under the active workspace:
 ├── config.json
 ├── AGENTS.md
 ├── DML_REFERENCE.md
-└── skills/
-    ├── example.dml
-    └── deep_research.dml
+├── skills/
+│   ├── example.dml
+│   └── deep_research.dml
+└── plans/
 ```
 
 Existing files are never overwritten silently. The extension neither creates nor reads `.deepclause/`.
 
-`AGENTS.md` teaches pi how to author and conservatively edit DML. `DML_REFERENCE.md` is the bundled language/runtime reference. Add user-maintained programs to `skills/`; pi can edit these files with its normal coding tools.
+`AGENTS.md` teaches pi how to author and conservatively edit DML. `DML_REFERENCE.md` is the bundled language/runtime reference. Add user-maintained programs to `skills/`; `/dc-plan` writes generated executable programs to `plans/`. Pi can edit either with its normal coding tools.
 
 ## Session context
 
@@ -88,7 +95,8 @@ Configure the default mode in `.pi/deepclause/config.json`:
   "branchMessageLimit": 20,
   "gasLimit": 100000,
   "maxTokens": 16384,
-  "verbose": false
+    "verbose": false,
+    "modelToolEnabled": false
 }
 ```
 
@@ -98,15 +106,42 @@ Configure the default mode in `.pi/deepclause/config.json`:
 
 Pi remains the sole persistent session owner. Executions stop when their pi session closes or changes, and results are rendered into the current session.
 
+## Opt-in model tool
+
+The model-callable `dc_run` tool is disabled by default. Enable it explicitly for the current workspace:
+
+```text
+/dc-tool enable
+```
+
+The change takes effect immediately and persists in `.pi/deepclause/config.json`; no reload is required. Use `/dc-tool status` to inspect it and `/dc-tool disable` to remove it from pi's active tools.
+
+When active, pi can call `dc_run` with an existing `skill`, optional positional `args`, and an optional `turn`, `branch`, or `isolated` context override. The tool reuses the same path isolation, active model, cancellation, session context, events, and runtime policy as `/dc-run`. It rejects concurrent execution, cannot compile natural language into DML, and cannot escape `.pi/deepclause/`. Any DML request for `pi_bash` still requires explicit user approval.
+
+Contextual plans containing `pi_agent_step` cannot be invoked through `dc_run`. They must be started explicitly by the user with `/dc-run`, which displays a confirmation first.
+
+## Contextual executable plans
+
+`/dc-plan` starts a normal pi agent turn. The planner can inspect the workspace and account for project instructions, loaded skills, the selected model, and currently active built-in or extension tools. It does not ask the model to emit raw DML. Instead, a transaction-scoped `dc_plan_commit` tool accepts a typed plan specification; the extension validates it, deterministically assembles DML, validates the generated program with the SDK parser, previews it for confirmation, and writes it without overwriting an existing plan.
+
+The resulting `.dml` file is the plan. Steps use one of two executors:
+
+- `dml` — contained reasoning through ordinary typed DML tasks.
+- `pi` — a bounded `pi_agent_step` that runs as a normal pi turn with current session context and loaded skills.
+
+For each pi step, only the exact tools named in the committed plan are temporarily active. They must still be installed and active when execution begins; existing tool policies, UI, and approvals remain authoritative. DeepClause control tools cannot be requested recursively. The prior active-tool set is restored after success, failure, or cancellation.
+
 ## Runtime tools and approval
 
-The extension does not expose DeepClause as a tool to the pi model and does not expose pi's general tool registry to DML. It registers only:
+The extension never exposes pi's general tool registry directly to ordinary DML. The optional `dc_run` tool runs an existing DML program; inside that runtime, only these host operations are registered:
 
 - `pi_workspace_list(RelativePath)` — read-only, one-level workspace listing. Absolute paths, traversal, and resolved symlink escapes are rejected.
 - `pi_bash(Command)` — runs an explicitly approved shell command in the active workspace.
 - `pi_bash(Executable, Args)` — runs an explicitly approved executable with a separate argv list, avoiding shell interpolation.
 
 Every `pi_bash` call has a 60-second timeout, inherits cancellation, and is denied when interactive approval is unavailable.
+
+User-approved contextual plans additionally receive the internal `pi_agent_step` bridge. That bridge delegates a bounded instruction to a normal pi turn rather than invoking arbitrary tools itself, preserving policies from pi and other extensions.
 
 DML can wrap these runtime operations in higher-level tool predicates. It can also wrap the SDK's internal `ask_user` operation. During `/dc-run`, `ask_user` opens pi's native, cancellable input UI and returns the response to the DML task loop.
 
@@ -169,6 +204,19 @@ The SDK supports incremental text callbacks inside `task/N`. The current pi adap
 
 ## Authoring a skill
 
+New workspaces receive a comprehensive `.pi/deepclause/AGENTS.md` authoring guide distilled from the SDK language reference, runtime implementation, examples, compiler prompts, and planning benchmarks. It teaches pi to design DML as deterministic Prolog orchestration around typed model tasks, narrow tools, explicit progress, constraints, and safe fallback.
+
+The evidence and design decisions behind it are recorded in [docs/AUTHORING_GUIDE_ANALYSIS.md](docs/AUTHORING_GUIDE_ANALYSIS.md).
+
+The design and security rationale for `/dc-plan` are recorded in [docs/DC_PLAN_PROPOSAL.md](docs/DC_PLAN_PROPOSAL.md).
+
+The guide covers:
+
+- `agent_main/0` through `agent_main/3`, typed `task/N` and isolated `prompt/N`
+- memory, interpolation, dicts, model-callable DML tools, and pi's restricted host tools
+- backtracking, CLP constraints, failure handling, command approval, and validation workflow
+- architecture patterns for research, constrained planning, workspace engineering, compliance gates, interactive expert systems, data pipelines, and generate-review-repair workflows
+
 A minimal skill accepts one slash-command argument:
 
 ```prolog
@@ -197,7 +245,8 @@ The package depends on `deepclause-sdk` 0.0.87 and uses pi packages as peer depe
 - No Markdown-to-DML compiler
 - No dynamic per-skill slash commands
 - No independent DeepClause session or execution-log store
-- No access to pi's full tool registry
+- No direct DML access to pi's full tool registry
+- No model-callable execution unless the user enables `dc_run` for the workspace
 - No silent mutation of user files
 - No workspace path escape
 

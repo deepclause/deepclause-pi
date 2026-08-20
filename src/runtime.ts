@@ -9,9 +9,10 @@ import type {
   MemoryMessage,
   DeepClauseSDK,
 } from "deepclause-sdk";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import type { DeepClauseConfig } from "./config.js";
+import { PI_AGENT_STEP_TOOL } from "./planner.js";
 
 export const PI_WORKSPACE_LIST_TOOL = "pi_workspace_list";
 export const PI_BASH_TOOL = "pi_bash";
@@ -109,7 +110,7 @@ const emptyUsage = () => ({
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 });
 
-function toPiMessages(messages: LLMBackendMessage[], model: NonNullable<ExtensionCommandContext["model"]>): Message[] {
+function toPiMessages(messages: LLMBackendMessage[], model: NonNullable<ExtensionContext["model"]>): Message[] {
   return messages
     .filter((message) => message.role !== "system")
     .map((message) => {
@@ -151,7 +152,7 @@ function toPiMessages(messages: LLMBackendMessage[], model: NonNullable<Extensio
 }
 
 function createPiBackend(
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   maxTokens: number,
   onDiagnostic: (message: string, details?: unknown) => void,
 ): LLMBackend {
@@ -242,6 +243,20 @@ export interface ExecutionCallbacks {
   onDiagnostic?(message: string, details?: unknown): void;
 }
 
+export interface PiAgentStepRequest {
+  instruction: string;
+  tools: string[];
+  expected: string;
+  skills: string[];
+}
+
+export interface PiAgentStepResult {
+  success: boolean;
+  summary: string;
+  toolsUsed: string[];
+  errors: string[];
+}
+
 export interface ExecutionResult {
   answer?: string;
   errors: string[];
@@ -254,9 +269,10 @@ export async function executeDml(
   initialMessages: MemoryMessage[],
   config: DeepClauseConfig,
   pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   controller: AbortController,
   callbacks: ExecutionCallbacks,
+  runPiAgentStep?: (request: PiAgentStepRequest, signal: AbortSignal) => Promise<PiAgentStepResult>,
 ): Promise<ExecutionResult> {
   const model = ctx.model;
   if (!model) throw new Error("Select a pi model before running DeepClause");
@@ -282,7 +298,37 @@ export async function executeDml(
       );
     },
   );
-  sdk.setToolPolicy({ mode: "whitelist", tools: [PI_WORKSPACE_LIST_TOOL, PI_BASH_TOOL] });
+  if (runPiAgentStep) {
+    sdk.registerTool(PI_AGENT_STEP_TOOL, {
+      description: "Delegate one bounded plan step to pi using its current session context, skills, active tools, UI, approvals, and extension hooks.",
+      parameters: {
+        type: "object",
+        properties: {
+          instruction: { type: "string" },
+          tools: { type: "array", description: "Exact active pi tool names allowed for this step" },
+          expected: { type: "string" },
+          skills: { type: "array", description: "Relevant loaded pi skill names" },
+        },
+        required: ["instruction", "tools", "expected", "skills"],
+      },
+      execute: async (args) => {
+        const result = await runPiAgentStep({
+          instruction: typeof args.instruction === "string" ? args.instruction : "",
+          tools: Array.isArray(args.tools) ? args.tools.map(String) : [],
+          expected: typeof args.expected === "string" ? args.expected : "",
+          skills: Array.isArray(args.skills) ? args.skills.map(String) : [],
+        }, controller.signal);
+        if (!result.success) {
+          throw new Error(result.errors.join("; ") || result.summary || "Delegated pi plan step failed");
+        }
+        return result.summary;
+      },
+    });
+  }
+  sdk.setToolPolicy({
+    mode: "whitelist",
+    tools: [PI_WORKSPACE_LIST_TOOL, PI_BASH_TOOL, ...(runPiAgentStep ? [PI_AGENT_STEP_TOOL] : [])],
+  });
 
   const result: ExecutionResult = {
     errors: [],

@@ -5,11 +5,94 @@ import { describe, expect, it } from "vitest";
 import { createDeepClause } from "deepclause-sdk";
 import type { LLMBackend } from "deepclause-sdk";
 import { buildInitialMessages } from "../src/context.js";
-import { parseRun, splitArguments } from "../src/index.js";
+import deepClauseExtension, { parsePlan, parseRun, splitArguments } from "../src/index.js";
 import { registerPiRuntimeTools } from "../src/runtime.js";
 import { EXAMPLE_DML, initializeWorkspace, resolveDmlPath } from "../src/workspace.js";
+import { assemblePlanDml, readPlanRequiredTools, validateGeneratedPlan, validatePlanSpec, type PlanningSnapshot } from "../src/planner.js";
 
 describe("DeepClause pi extension helpers", () => {
+  function extensionHarness(cwd: string) {
+    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+    const eventHandlers = new Map<string, (event: unknown, ctx: any) => unknown>();
+    const tools = new Map<string, any>();
+    let activeTools = ["read", "bash"];
+    const sentUserMessages: string[] = [];
+    const customMessages: Array<{ content: string; details?: unknown }> = [];
+    let abortCalls = 0;
+    const pi = {
+      registerCommand(name: string, definition: { handler: (args: string, ctx: any) => Promise<void> }) {
+        commands.set(name, definition);
+      },
+      registerTool(definition: { name: string }) {
+        tools.set(definition.name, definition);
+      },
+      on(name: string, handler: (event: unknown, ctx: any) => unknown) {
+        eventHandlers.set(name, handler);
+      },
+      getActiveTools: () => [...activeTools],
+      getAllTools: () => [
+        { name: "read", description: "Read files", parameters: { type: "object" }, sourceInfo: { source: "core" } },
+        { name: "bash", description: "Run commands", parameters: { type: "object" }, sourceInfo: { source: "core" } },
+        ...[...tools.values()].map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+          promptGuidelines: tool.promptGuidelines,
+          sourceInfo: { source: "extension" },
+        })),
+      ],
+      setActiveTools(names: string[]) {
+        activeTools = [...names];
+      },
+      getThinkingLevel: () => "medium",
+      sendUserMessage(content: string) { sentUserMessages.push(content); },
+      sendMessage(message: { content: string; details?: unknown }) { customMessages.push(message); },
+      async exec() {
+        return { stdout: "", stderr: "", code: 0, killed: false };
+      },
+    };
+    const notifications: string[] = [];
+    const ctx = {
+      cwd,
+      model: { provider: "test", id: "model" },
+      modelRegistry: {
+        hasConfiguredAuth: () => true,
+        async complete() { throw new Error("Model completion was not expected"); },
+      },
+      sessionManager: { getBranch: () => [] },
+      thinkingLevel: "medium",
+      isIdle: () => true,
+      getSystemPrompt: () => "test system prompt",
+      getSystemPromptOptions: () => ({
+        cwd,
+        contextFiles: [{ path: "AGENTS.md", content: "instructions" }],
+        skills: [{ name: "test-skill", description: "test" }],
+      }),
+      hasUI: true,
+      abort() { abortCalls++; },
+      ui: {
+        notify(message: string) { notifications.push(message); },
+        async input() { return undefined; },
+        async confirm() { return false; },
+        setStatus() {},
+        setWidget() {},
+      },
+    };
+    deepClauseExtension(pi as any);
+    return {
+      commands,
+      eventHandlers,
+      tools,
+      pi,
+      ctx,
+      notifications,
+      sentUserMessages,
+      customMessages,
+      abortCalls: () => abortCalls,
+      activeTools: () => activeTools,
+    };
+  }
+
   it("parses quoted slash-command arguments", () => {
     expect(splitArguments(`review "two words" 'three words'`)).toEqual([
       "review",
@@ -29,6 +112,236 @@ describe("DeepClause pi extension helpers", () => {
     expect(parseRun("example -v")).toMatchObject({ verbose: true, debug: false });
   });
 
+  it("parses contextual plan requests and filename overrides", () => {
+    expect(parsePlan(`migrate the project to ESM --name="esm migration" --debug`)).toEqual({
+      request: "migrate the project to ESM",
+      name: "esm migration",
+      debug: true,
+    });
+  });
+
+  it("validates and assembles contextual DML plans", async () => {
+    const snapshot: PlanningSnapshot = {
+      model: "test/model",
+      thinkingLevel: "medium",
+      activeTools: ["read", "bash"],
+      allTools: [
+        { name: "read", description: "Read", parameters: { type: "object" }, sourceInfo: { source: "core" } } as any,
+        { name: "bash", description: "Bash", parameters: { type: "object" }, sourceInfo: { source: "core" } } as any,
+      ],
+      skillNames: ["repo-review"],
+      contextFiles: ["AGENTS.md"],
+      existingSkills: [],
+      existingPlans: [],
+    };
+    const plan = validatePlanSpec({
+      slug: "esm migration",
+      title: "ESM migration",
+      objective: "Migrate safely",
+      assumptions: [],
+      steps: [
+        {
+          id: "inspect",
+          title: "Inspect repository",
+          instruction: "Inspect the repository and identify module boundaries.",
+          executor: "pi",
+          requiredTools: ["read"],
+          relevantSkills: ["repo-review"],
+          expectedResult: "A concrete migration map",
+        },
+        {
+          id: "review",
+          title: "Review results",
+          instruction: "Review the migration map for omissions.",
+          executor: "dml",
+          requiredTools: [],
+          relevantSkills: [],
+          expectedResult: "A concise review",
+        },
+      ],
+      finalSynthesis: "Summarize the completed migration plan.",
+      failureMessage: "The migration plan failed.",
+    }, snapshot);
+    const dml = assemblePlanDml(plan, snapshot);
+    expect(dml).toContain("exec(pi_agent_step(");
+    expect(dml).toContain("task(\"Review the migration map");
+    expect(dml).toContain("Step1Summary \\= \"\"");
+    expect(dml).not.toContain("Step1Summary = \"\"");
+    await expect(validateGeneratedPlan(dml)).resolves.toBeUndefined();
+  });
+
+  it("rejects inactive and recursive tools in contextual plan specifications", () => {
+    const snapshot: PlanningSnapshot = {
+      model: "test/model",
+      thinkingLevel: "medium",
+      activeTools: ["read"],
+      allTools: [
+        { name: "read", description: "Read", parameters: { type: "object" }, sourceInfo: { source: "core" } } as any,
+        { name: "bash", description: "Bash", parameters: { type: "object" }, sourceInfo: { source: "core" } } as any,
+        { name: "dc_run", description: "DeepClause", parameters: { type: "object" }, sourceInfo: { source: "extension" } } as any,
+      ],
+      skillNames: [],
+      contextFiles: [],
+      existingSkills: [],
+      existingPlans: [],
+    };
+    const spec = (requiredTools: string[]) => ({
+      slug: "unsafe",
+      title: "Unsafe",
+      objective: "Test rejection",
+      assumptions: [],
+      steps: [{
+        id: "step",
+        title: "Step",
+        instruction: "Perform the step.",
+        executor: "pi",
+        requiredTools,
+        relevantSkills: [],
+        expectedResult: "A result",
+      }],
+      failureMessage: "Failed.",
+    });
+    expect(() => validatePlanSpec(spec(["bash"]), snapshot)).toThrow("inactive pi tool bash");
+    expect(() => validatePlanSpec(spec(["dc_run"]), snapshot)).toThrow("recursive control tool dc_run");
+  });
+
+  it("creates a plan through a pi-native planning turn and commit tool", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-plan-"));
+    const harness = extensionHarness(cwd);
+    harness.ctx.ui.confirm = async () => true;
+    await harness.commands.get("dc-plan")!.handler("inspect this repository --name=repo-plan", harness.ctx);
+    expect(harness.sentUserMessages).toHaveLength(1);
+    expect(harness.sentUserMessages[0]).toContain("test-skill");
+    expect(harness.activeTools()).toContain("dc_plan_commit");
+
+    const result = await harness.tools.get("dc_plan_commit").execute(
+      "commit-1",
+      {
+        slug: "ignored",
+        title: "Repository inspection",
+        objective: "Inspect the repository using pi context",
+        assumptions: [],
+        steps: [{
+          id: "inspect",
+          title: "Inspect repository",
+          instruction: "Inspect project instructions and source files, then report findings.",
+          executor: "pi",
+          requiredTools: ["read"],
+          relevantSkills: ["test-skill"],
+          expectedResult: "Files, constraints, and findings",
+        }],
+        finalSynthesis: "Summarize the inspection.",
+        failureMessage: "Repository inspection failed.",
+      },
+      new AbortController().signal,
+      undefined,
+      harness.ctx,
+    );
+    expect(result.details).toMatchObject({ success: true, path: "plans/repo_plan.dml", contextual: true });
+    expect(await readFile(path.join(cwd, ".pi", "deepclause", "plans", "repo_plan.dml"), "utf8")).toContain("pi_agent_step");
+    expect(harness.activeTools()).not.toContain("dc_plan_commit");
+  });
+
+  it("executes a contextual plan step through pi and restores active tools", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-plan-run-"));
+    const harness = extensionHarness(cwd);
+    harness.ctx.ui.confirm = async () => true;
+    const paths = await initializeWorkspace(cwd);
+    const snapshot: PlanningSnapshot = {
+      model: "test/model",
+      thinkingLevel: "medium",
+      activeTools: ["read", "bash"],
+      allTools: harness.pi.getAllTools() as any,
+      skillNames: ["test-skill"],
+      contextFiles: ["AGENTS.md"],
+      existingSkills: [],
+      existingPlans: [],
+    };
+    const plan = validatePlanSpec({
+      slug: "contextual-run",
+      title: "Contextual run",
+      objective: "Delegate one bounded step",
+      assumptions: [],
+      steps: [{
+        id: "inspect",
+        title: "Inspect",
+        instruction: "Inspect the relevant files.",
+        executor: "pi",
+        requiredTools: ["read"],
+        relevantSkills: ["test-skill"],
+        expectedResult: "A concise inspection summary",
+      }],
+      failureMessage: "Inspection failed.",
+    }, snapshot);
+    await writeFile(path.join(paths.plans, "contextual_run.dml"), assemblePlanDml(plan, snapshot), "utf8");
+    expect(await readPlanRequiredTools(path.join(paths.plans, "contextual_run.dml"))).toEqual(["read"]);
+
+    let notifyStepStarted!: () => void;
+    const stepStarted = new Promise<void>((resolve) => { notifyStepStarted = resolve; });
+    harness.pi.sendUserMessage = (content: string) => {
+      harness.sentUserMessages.push(content);
+      notifyStepStarted();
+    };
+    const running = harness.commands.get("dc-run")!.handler("plans/contextual_run.dml --context=isolated", harness.ctx);
+    await stepStarted;
+    expect(harness.sentUserMessages[0]).toContain("Inspect the relevant files");
+    expect(harness.sentUserMessages[0]).toContain("Internal correlation: dc-step-");
+    expect(harness.activeTools()).toEqual(["read"]);
+    harness.eventHandlers.get("agent_end")!({
+      type: "agent_end",
+      messages: [{ role: "assistant", content: [{ type: "text", text: "Inspected src and found no issues." }] }],
+    }, harness.ctx);
+    harness.eventHandlers.get("agent_settled")!({ type: "agent_settled" }, harness.ctx);
+    await running;
+
+    expect(harness.activeTools()).toEqual(["read", "bash"]);
+    expect(harness.customMessages.at(-1)).toMatchObject({ content: expect.stringContaining("Inspected src and found no issues") });
+  });
+
+  it("fails contextual plan preflight when a required pi tool is inactive", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-plan-preflight-"));
+    const harness = extensionHarness(cwd);
+    harness.ctx.ui.confirm = async () => true;
+    const paths = await initializeWorkspace(cwd);
+    await writeFile(path.join(paths.plans, "needs_bash.dml"), `
+% Required pi tools: bash
+agent_main :-
+    exec(pi_agent_step(instruction: "Inspect", tools: ["bash"], expected: "Summary", skills: []), Summary),
+    answer(Summary).
+`, "utf8");
+    harness.pi.setActiveTools(["read"]);
+    await harness.commands.get("dc-run")!.handler("plans/needs_bash.dml", harness.ctx);
+    expect(harness.customMessages.at(-1)?.content).toContain("requires inactive pi tools: bash");
+    expect(harness.sentUserMessages).toHaveLength(0);
+  });
+
+  it("cancels a delegated pi plan step and restores active tools", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-plan-cancel-"));
+    const harness = extensionHarness(cwd);
+    harness.ctx.ui.confirm = async () => true;
+    const paths = await initializeWorkspace(cwd);
+    await writeFile(path.join(paths.plans, "cancel.dml"), `
+% Required pi tools: read
+agent_main :-
+    exec(pi_agent_step(instruction: "Wait for cancellation", tools: ["read"], expected: "Summary", skills: []), Summary),
+    answer(Summary).
+agent_main :- answer("Cancelled fallback").
+`, "utf8");
+    let notifyStepStarted!: () => void;
+    const stepStarted = new Promise<void>((resolve) => { notifyStepStarted = resolve; });
+    harness.pi.sendUserMessage = (content: string) => {
+      harness.sentUserMessages.push(content);
+      notifyStepStarted();
+    };
+    const running = harness.commands.get("dc-run")!.handler("plans/cancel.dml", harness.ctx);
+    await stepStarted;
+    expect(harness.activeTools()).toEqual(["read"]);
+    await harness.commands.get("dc-cancel")!.handler("", harness.ctx);
+    await running;
+    expect(harness.abortCalls()).toBe(1);
+    expect(harness.activeTools()).toEqual(["read", "bash"]);
+  });
+
   it("builds isolated, turn, and bounded branch context", () => {
     const entries = [
       { type: "message", message: { role: "user", content: "old" } },
@@ -43,13 +356,113 @@ describe("DeepClause pi extension helpers", () => {
   it("initializes non-destructively without creating .deepclause", async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-"));
     const paths = await initializeWorkspace(cwd);
+    const seededGuide = await readFile(paths.agents, "utf8");
     await writeFile(paths.agents, "user-owned\n", "utf8");
     await initializeWorkspace(cwd);
 
+    expect(seededGuide).toContain("deterministic workflow with probabilistic leaves");
+    expect(seededGuide).toContain("Applications enabled by DML in pi");
+    expect(seededGuide).toContain("pi_bash(Executable, Args)");
     expect(await readFile(paths.agents, "utf8")).toBe("user-owned\n");
     await expect(readFile(path.join(cwd, ".deepclause", "config.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readFile(path.join(paths.skills, "example.dml"), "utf8")).toContain("agent_main");
     expect(await readFile(path.join(paths.skills, "deep_research.dml"), "utf8")).toContain('pi_bash("curl", CurlArgs)');
+    expect(JSON.parse(await readFile(paths.config, "utf8"))).toMatchObject({ modelToolEnabled: false });
+  });
+
+  it("keeps dc_run disabled by default and toggles it per workspace", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-tool-"));
+    const harness = extensionHarness(cwd);
+
+    await harness.eventHandlers.get("session_start")?.({}, harness.ctx);
+    expect(harness.tools.has("dc_run")).toBe(false);
+    expect(harness.activeTools()).not.toContain("dc_run");
+
+    await harness.commands.get("dc-tool")?.handler("enable", harness.ctx);
+    expect(harness.tools.has("dc_run")).toBe(true);
+    expect(harness.activeTools()).toContain("dc_run");
+    expect(JSON.parse(await readFile(path.join(cwd, ".pi", "deepclause", "config.json"), "utf8"))).toMatchObject({
+      modelToolEnabled: true,
+    });
+
+    const restarted = extensionHarness(cwd);
+    await restarted.eventHandlers.get("session_start")?.({}, restarted.ctx);
+    expect(restarted.tools.has("dc_run")).toBe(true);
+    expect(restarted.activeTools()).toContain("dc_run");
+
+    const skillPath = path.join(cwd, ".pi", "deepclause", "skills", "tool_test.dml");
+    await writeFile(skillPath, 'agent_main(Name) :- format(string(Result), "Hello, ~w", [Name]), answer(Result).\n', "utf8");
+    const result = await harness.tools.get("dc_run").execute(
+      "call-1",
+      { skill: "tool_test", args: ["Pi"], context: "isolated" },
+      new AbortController().signal,
+      undefined,
+      harness.ctx,
+    );
+    expect(result.content[0].text).toBe("Hello, Pi");
+    expect(result.details).toMatchObject({ success: true, skill: "skills/tool_test.dml", contextMode: "isolated" });
+
+    await harness.commands.get("dc-tool")?.handler("disable", harness.ctx);
+    expect(harness.activeTools()).not.toContain("dc_run");
+    expect(JSON.parse(await readFile(path.join(cwd, ".pi", "deepclause", "config.json"), "utf8"))).toMatchObject({
+      modelToolEnabled: false,
+    });
+    const disabledResult = await harness.tools.get("dc_run").execute(
+      "call-disabled",
+      { skill: "tool_test" },
+      new AbortController().signal,
+      undefined,
+      harness.ctx,
+    );
+    expect(disabledResult.details).toMatchObject({ success: false, error: "tool_disabled" });
+  });
+
+  it("prevents model-callable dc_run from starting contextual plans", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-contextual-tool-"));
+    const harness = extensionHarness(cwd);
+    await harness.commands.get("dc-tool")?.handler("enable", harness.ctx);
+    const paths = await initializeWorkspace(cwd);
+    await writeFile(path.join(paths.plans, "interactive.dml"), `
+      agent_main :-
+        exec(pi_agent_step(instruction: "Inspect", tools: [], expected: "Summary", skills: []), Summary),
+        answer(Summary).
+    `, "utf8");
+    const result = await harness.tools.get("dc_run").execute(
+      "call-contextual",
+      { skill: "plans/interactive.dml", context: "isolated" },
+      new AbortController().signal,
+      undefined,
+      harness.ctx,
+    );
+    expect(result.details).toMatchObject({ success: false, error: "interactive_plan_requires_user_run" });
+    expect(harness.sentUserMessages).toHaveLength(0);
+  });
+
+  it("rejects a concurrent dc_run execution", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-tool-concurrency-"));
+    const harness = extensionHarness(cwd);
+    await harness.commands.get("dc-tool")?.handler("enable", harness.ctx);
+    const skillPath = path.join(cwd, ".pi", "deepclause", "skills", "wait.dml");
+    await writeFile(skillPath, `
+      agent_main :-
+        exec(pi_workspace_list("."), _Result),
+        answer("continued").
+    `, "utf8");
+
+    let releaseExec!: (value: { stdout: string; stderr: string; code: number; killed: boolean }) => void;
+    const execRequested = new Promise<void>((resolve) => {
+      harness.pi.exec = () => new Promise((release) => {
+        releaseExec = release;
+        resolve();
+      });
+    });
+    const tool = harness.tools.get("dc_run");
+    const first = tool.execute("call-1", { skill: "wait" }, new AbortController().signal, undefined, harness.ctx);
+    await execRequested;
+    const second = await tool.execute("call-2", { skill: "wait" }, new AbortController().signal, undefined, harness.ctx);
+    expect(second.details).toMatchObject({ success: false, error: "execution_already_active" });
+    releaseExec({ stdout: "", stderr: "", code: 0, killed: false });
+    expect((await first).content[0].text).toBe("continued");
   });
 
   it("rejects traversal and symlink escapes", async () => {

@@ -27,11 +27,14 @@ Once the SDK is available from npm:
 ```sh
 npm ci
 npm run check
+npm pack --dry-run
 git add .
-git commit -m "Fix SDK dependency for Git installs"
-git tag v0.1.1
+git commit -m "Release deepclause-pi 0.1.2"
+git tag -a v0.1.2 -m "deepclause-pi 0.1.2"
 git push origin main --tags
 ```
+
+Create a GitHub release from tag `v0.1.2`, using the `0.1.2` section of `CHANGELOG.md` as the release notes. Do not attach a generated tarball; GitHub provides source archives and pi installs directly from the repository.
 
 Users can then install the extension with:
 
@@ -39,4 +42,4 @@ Users can then install the extension with:
 pi install git:github.com/deepclause/deepclause-pi
 ```
 
-If publishing the extension to npm later, inspect `npm pack --dry-run` and use `npm publish --access public`; the package already runs `npm run check` through `prepublishOnly`.
+Publishing the extension to npm is optional and is not required for `pi install git:github.com/deepclause/deepclause-pi`. If publishing to npm, authenticate with npm, confirm the name is available with `npm view deepclause-pi`, and run `npm publish --access public`; the package already runs `npm run check` through `prepublishOnly`.

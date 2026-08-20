@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 
 export type ContextMode = "turn" | "branch" | "isolated";
 
@@ -9,6 +9,7 @@ export interface DeepClauseConfig {
   gasLimit: number;
   maxTokens: number;
   verbose: boolean;
+  modelToolEnabled: boolean;
 }
 
 export const DEFAULT_CONFIG: DeepClauseConfig = {
@@ -18,6 +19,7 @@ export const DEFAULT_CONFIG: DeepClauseConfig = {
   gasLimit: 100_000,
   maxTokens: 16_384,
   verbose: false,
+  modelToolEnabled: false,
 };
 
 const isContextMode = (value: unknown): value is ContextMode =>
@@ -52,5 +54,21 @@ export async function loadConfig(path: string): Promise<DeepClauseConfig> {
     gasLimit: positiveInteger("gasLimit", DEFAULT_CONFIG.gasLimit),
     maxTokens: positiveInteger("maxTokens", DEFAULT_CONFIG.maxTokens),
     verbose: config.verbose === true,
+    modelToolEnabled: config.modelToolEnabled === true,
   };
+}
+
+export async function setModelToolEnabled(configPath: string, enabled: boolean): Promise<DeepClauseConfig> {
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(configPath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Invalid DeepClause config: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  await writeFile(configPath, `${JSON.stringify({ ...existing, modelToolEnabled: enabled }, null, 2)}\n`, "utf8");
+  return loadConfig(configPath);
 }
