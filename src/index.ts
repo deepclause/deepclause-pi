@@ -540,7 +540,10 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
       pending.cleanup();
       const summary = pending.summary?.trim() ?? "";
       pending.resolve({
-        success: summary.length > 0 && pending.errors.length === 0,
+        // Tool failures are normal, recoverable events in a pi agent loop. The
+        // delegated step succeeds when pi settles with a textual summary; the
+        // collected failures remain available as diagnostics.
+        success: summary.length > 0,
         summary: summary || "Pi completed the delegated turn without a textual summary.",
         toolsUsed: pending.toolsUsed,
         errors: pending.errors,

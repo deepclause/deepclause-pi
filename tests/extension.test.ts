@@ -298,6 +298,47 @@ describe("DeepClause pi extension helpers", () => {
     expect(harness.customMessages.at(-1)).toMatchObject({ content: expect.stringContaining("Inspected src and found no issues") });
   });
 
+  it("allows a delegated step to recover from an intermediate pi tool failure", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-plan-recovery-"));
+    const harness = extensionHarness(cwd);
+    harness.ctx.ui.confirm = async () => true;
+    const paths = await initializeWorkspace(cwd);
+    await writeFile(path.join(paths.plans, "recovery.dml"), `
+% Required pi tools: bash, read
+agent_main :-
+    exec(pi_agent_step(
+        instruction: "Inspect the workspace and recover from non-fatal command errors.",
+        tools: ["bash", "read"],
+        expected: "A final inspection summary",
+        skills: []
+    ), Summary),
+    answer(Summary).
+`, "utf8");
+
+    let notifyStepStarted!: () => void;
+    const stepStarted = new Promise<void>((resolve) => { notifyStepStarted = resolve; });
+    harness.pi.sendUserMessage = (content: string) => {
+      harness.sentUserMessages.push(content);
+      notifyStepStarted();
+    };
+    const running = harness.commands.get("dc-run")!.handler("plans/recovery.dml", harness.ctx);
+    await stepStarted;
+    harness.eventHandlers.get("tool_execution_end")!({
+      type: "tool_execution_end",
+      toolName: "bash",
+      isError: true,
+    }, harness.ctx);
+    harness.eventHandlers.get("agent_end")!({
+      type: "agent_end",
+      messages: [{ role: "assistant", content: [{ type: "text", text: "Recovered and completed the inspection." }] }],
+    }, harness.ctx);
+    harness.eventHandlers.get("agent_settled")!({ type: "agent_settled" }, harness.ctx);
+    await running;
+
+    expect(harness.activeTools()).toEqual(["read", "bash"]);
+    expect(harness.customMessages.at(-1)?.content).toContain("Recovered and completed the inspection.");
+  });
+
   it("fails contextual plan preflight when a required pi tool is inactive", async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-plan-preflight-"));
     const harness = extensionHarness(cwd);

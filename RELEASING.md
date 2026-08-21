@@ -29,12 +29,12 @@ npm ci
 npm run check
 npm pack --dry-run
 git add .
-git commit -m "Release deepclause-pi 0.1.2"
-git tag -a v0.1.2 -m "deepclause-pi 0.1.2"
+git commit -m "Release deepclause-pi 0.1.3"
+git tag -a v0.1.3 -m "deepclause-pi 0.1.3"
 git push origin main --tags
 ```
 
-Create a GitHub release from tag `v0.1.2`, using the `0.1.2` section of `CHANGELOG.md` as the release notes. Do not attach a generated tarball; GitHub provides source archives and pi installs directly from the repository.
+Create a GitHub release from tag `v0.1.3`, using the `0.1.3` section of `CHANGELOG.md` as the release notes. Do not attach a generated tarball; GitHub provides source archives and pi installs directly from the repository.
 
 Users can then install the extension with:
 

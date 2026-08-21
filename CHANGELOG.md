@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 - 2026-08-21
+
+- Let contextual `pi_agent_step` execution complete when pi recovers from an intermediate tool error and produces a final summary. Tool failures remain recorded as diagnostics instead of incorrectly causing the DML `exec/2` goal to fail.
+
 ## 0.1.2 - 2026-08-20
 
 - Add the model-callable `dc_run` tool for executing existing DML programs.
