@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 - 2026-08-23
+
+- Add the `pi-package` npm keyword so the extension can be discovered as a pi package.
+
 ## 0.1.3 - 2026-08-21
 
 - Let contextual `pi_agent_step` execution complete when pi recovers from an intermediate tool error and produces a final summary. Tool failures remain recorded as diagnostics instead of incorrectly causing the DML `exec/2` goal to fail.
