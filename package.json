@@ -25,11 +25,15 @@
   "files": [
     "dist",
     "docs",
-    "src"
+    "src",
+    "skills"
   ],
   "pi": {
     "extensions": [
       "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {
