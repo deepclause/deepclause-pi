@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 - 2026-09-07
+
+- Add the handbook-dml skill for SOP -> DML (see HANDBOOK.md benchmark and paper) 
+
 ## 0.1.4 - 2026-08-23
 
 - Add the `pi-package` npm keyword so the extension can be discovered as a pi package.
