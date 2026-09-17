@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 - 2026-09-17
+
+- Ask pi for a diagram of any DML file and get a self-contained offline Mermaid viewer.
+- Add the always-active `dc_diagram` model tool with `presentation` and `specification` grades (and `both`).
+- Keep DML sources anywhere (workspace-relative or absolute) while confining generated viewers to `.pi/deepclause/diagrams/`.
+- Extract diagrams in-process (no shell approval) and validate model output with structural checks plus the real Mermaid parser when Chrome is available.
+- Vendor Mermaid so the viewer works offline; no network or external tooling required.
+- Document the diagram workflow in the bundled authoring guide.
+
 ## 0.1.5 - 2026-09-07
 
 - Add the handbook-dml skill for SOP -> DML (see HANDBOOK.md benchmark and paper) 

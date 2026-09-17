@@ -375,6 +375,22 @@ DML is most valuable when an application needs more structure than a prompt and 
 
 Poor fits include long-running background services, high-frequency shell automation that would require many approval prompts, workflows needing unrestricted pi tools, secret handling, or durable state without an explicit workspace storage design.
 
+## Diagrams
+
+Pi can turn any DML file into a self-contained, offline Mermaid viewer. Ask for one in plain language:
+
+> "Make a presentation-grade diagram of .pi/deepclause/skills/my_skill.dml"
+> "Give me a specification-grade diagram of src/report.dml"
+
+Pi calls the `dc_diagram` model tool with the DML path and a grade:
+
+- **presentation** — about 8-12 nodes, plain language, headline numbers (slides and overviews).
+- **specification** — function names, task/tool roles, post-conditions (engineers).
+
+The tool extracts a deterministic Mermaid seed, has pi rewrite it in the chosen grade, validates the result, writes the viewer under `.pi/deepclause/diagrams/`, and opens it. The DML file may live anywhere (workspace-relative or absolute); only the generated viewer stays under `.pi/deepclause/`.
+
+Do not hand-write Mermaid for the user, and do not copy diagram tooling into the workspace. Regenerating a grade replaces only that grade's sidecar (`<name>.presentation.mmd` / `<name>.specification.mmd`).
+
 ## Conservative editing rules
 
 When modifying an existing skill:

@@ -131,6 +131,29 @@ The resulting `.dml` file is the plan. Steps use one of two executors:
 
 For each pi step, only the exact tools named in the committed plan are temporarily active. They must still be installed and active when execution begins; existing tool policies, UI, and approvals remain authoritative. DeepClause control tools cannot be requested recursively. The prior active-tool set is restored after success, failure, or cancellation.
 
+## Diagrams
+
+Ask pi for a diagram of any DML file in plain language:
+
+```text
+Make a presentation-grade diagram of .pi/deepclause/skills/deep_research.dml
+Give me a specification-grade diagram of src/report.dml
+```
+
+Pi calls the always-active `dc_diagram` model tool, which:
+
+1. extracts a deterministic Mermaid seed from the DML in-process,
+2. has the active pi model rewrite it in the requested grade,
+3. validates each attempt (structural checks, plus the real Mermaid parser when Chrome is available),
+4. writes the sidecar under `.pi/deepclause/diagrams/`, rebuilds the self-contained offline `viewer.html`, and opens it.
+
+Grades:
+
+- **presentation** — about 8-12 nodes, plain language, headline numbers; for slides and overviews.
+- **specification** — function names, task/tool roles, post-conditions; for engineers.
+
+Selecting `both` produces both sidecars. The DML source may be anywhere (workspace-relative or absolute); only the generated viewer is confined to `.pi/deepclause/`. `dc_diagram` never executes the DML and needs no shell approval. Regenerating a grade replaces only that grade's sidecar (`<name>.presentation.mmd` / `<name>.specification.mmd`). The Mermaid bundle is vendored so the viewer works offline.
+
 ## Runtime tools and approval
 
 The extension never exposes pi's general tool registry directly to ordinary DML. The optional `dc_run` tool runs an existing DML program; inside that runtime, only these host operations are registered:

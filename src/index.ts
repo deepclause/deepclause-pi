@@ -1,11 +1,28 @@
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { DMLEvent } from "deepclause-sdk";
 import { Type } from "typebox";
 import { buildInitialMessages } from "./context.js";
 import { loadConfig, setModelToolEnabled, type ContextMode } from "./config.js";
+import { renderDml, renderSequence } from "./diagram/extract.js";
+import { polishDiagram, resolveGrade, type DiagramGrade } from "./diagram/grade.js";
+import { findChrome, validateMermaid, type MermaidView } from "./diagram/validate.js";
+import {
+  buildViewer,
+  openViewerInBrowser,
+  writeSidecar,
+} from "./diagram/viewer.js";
+import {
+  collectDiagramTargets,
+  diagramNameFor,
+  displayPath,
+  ensureDiagramDir,
+  resolveDiagramSource,
+} from "./diagram/workspace.js";
+import { completeTextWithPiModel } from "./model.js";
 import { executeDml } from "./runtime.js";
 import { getPaths, initializeWorkspace, resolveDmlPath } from "./workspace.js";
 import {
@@ -22,7 +39,8 @@ import {
 } from "./planner.js";
 
 const DC_RUN_TOOL = "dc_run";
-const AUTHORING_INSTRUCTION = `DeepClause programs live in .pi/deepclause/skills/ and executable generated plans live in .pi/deepclause/plans/. You may create and edit DML skills directly after consulting .pi/deepclause/AGENTS.md and DML_REFERENCE.md. Use /dc-plan when the user asks pi to design a contextual executable plan; finish that planning turn with dc_plan_commit. DeepClause compilation is unavailable, so generated content must already be valid DML. Users execute programs through /dc-run. If the opt-in dc_run tool is active, you may execute an ordinary skill with it, but contextual plans requiring pi_agent_step must be started by the user. Never invoke a compiler or create .deepclause/.`;
+const DC_DIAGRAM_TOOL = "dc_diagram";
+const AUTHORING_INSTRUCTION = `DeepClause programs live in .pi/deepclause/skills/ and executable generated plans live in .pi/deepclause/plans/. You may create and edit DML skills directly after consulting .pi/deepclause/AGENTS.md and DML_REFERENCE.md. Use /dc-plan when the user asks pi to design a contextual executable plan; finish that planning turn with dc_plan_commit. When the user asks for a diagram, flowchart, or visual of a .dml file, call the dc_diagram tool with the exact path and the requested grade (presentation or specification); it writes the viewer under .pi/deepclause/diagrams/ and opens it, so do not hand-write Mermaid. DeepClause compilation is unavailable, so generated content must already be valid DML. Users execute programs through /dc-run. If the opt-in dc_run tool is active, you may execute an ordinary skill with it, but contextual plans requiring pi_agent_step must be started by the user. Never invoke a compiler or create .deepclause/.`;
 const STATUS_KEY = "deepclause";
 const WIDGET_KEY = "deepclause-stream";
 
@@ -197,6 +215,14 @@ function modelLabel(ctx: ExtensionCommandContext): string {
   return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none selected";
 }
 
+async function bundledViewerTemplate(): Promise<string> {
+  return readFile(fileURLToPath(new URL("./assets/viewer.template.html", import.meta.url)), "utf8");
+}
+
+function viewerVendorAssetPath(): string {
+  return fileURLToPath(new URL("./assets/vendor/mermaid.min.js", import.meta.url));
+}
+
 function publishResult(pi: ExtensionAPI, content: string, details: Record<string, unknown>): void {
   pi.sendMessage({ customType: "deepclause-result", content, display: true, details });
 }
@@ -205,6 +231,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
   let activeController: AbortController | undefined;
   let activeDescription: string | undefined;
   let modelToolRegistered = false;
+  let diagramToolRegistered = false;
   let planCommitRegistered = false;
   let planningTransaction: PlanningTransaction | undefined;
   let pendingAgentStep: PendingAgentStep | undefined;
@@ -507,9 +534,135 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
     }
   };
 
+  const setDiagramToolActive = () => {
+    if (!diagramToolRegistered) {
+      pi.registerTool({
+        name: DC_DIAGRAM_TOOL,
+        label: "Create DeepClause Diagram",
+        description: "Create a presentation-grade or specification-grade Mermaid diagram from any .dml file, write a self-contained offline viewer under .pi/deepclause/diagrams/, and open it.",
+        promptSnippet: "Create a presentation- or specification-grade diagram from a DML file",
+        promptGuidelines: [
+          "Use dc_diagram whenever the user asks for a diagram, flowchart, or visual of a .dml file; pass the exact path the user named.",
+          "Choose grade=presentation for slides and overviews and grade=specification for engineering detail; use grade=both only when the user asks for both.",
+          "Do not hand-write Mermaid or run diagram tools yourself; call dc_diagram and report the viewer result.",
+        ],
+        parameters: Type.Object({
+          dml: Type.String({ description: "Path to a .dml file, relative to the workspace or absolute. A leading @ is ignored." }),
+          grade: Type.Optional(Type.String({ description: "presentation (default), specification, or both. Synonyms such as detailed or technical map to specification." })),
+          view: Type.Optional(StringEnum(["flow", "sequence"] as const, { description: "Base layout used to seed the grade; default flow." })),
+        }),
+        async execute(_toolCallId, params, signal, onUpdate, ctx) {
+          if (activeController) {
+            return {
+              content: [{ type: "text", text: "Another DeepClause operation is already active; wait for it to finish." }],
+              details: { success: false, error: "execution_already_active" },
+            };
+          }
+
+          const requested = resolveGrade(String(params.grade ?? "")) ?? "presentation";
+          const grades: DiagramGrade[] = requested === "both" ? ["presentation", "specification"] : [requested];
+          const view: MermaidView = params.view === "sequence" ? "sequence" : "flow";
+
+          let sourcePath: string;
+          try {
+            sourcePath = await resolveDiagramSource(ctx.cwd, params.dml);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { content: [{ type: "text", text: `dc_diagram failed: ${message}` }], details: { success: false, error: message } };
+          }
+          if (!ctx.model) {
+            return {
+              content: [{ type: "text", text: "dc_diagram requires an active pi model. Select one and try again." }],
+              details: { success: false, error: "no_model" },
+            };
+          }
+
+          const config = await loadConfig(getPaths(ctx.cwd).config);
+          const source = await readFile(sourcePath, "utf8");
+          const display = displayPath(ctx.cwd, sourcePath);
+          const seed = view === "sequence"
+            ? renderSequence(display, source)
+            : renderDml(display, source, { hideOutput: true });
+          const targets = await collectDiagramTargets(ctx.cwd, [sourcePath]);
+          const name = diagramNameFor(sourcePath, targets, ctx.cwd);
+          const { diagrams, vendor } = await ensureDiagramDir(ctx.cwd, viewerVendorAssetPath());
+          const templateText = await bundledViewerTemplate();
+
+          const controller = new AbortController();
+          const cancel = () => controller.abort(signal?.reason ?? new Error("dc_diagram cancelled"));
+          if (signal?.aborted) cancel();
+          else signal?.addEventListener("abort", cancel, { once: true });
+          activeController = controller;
+          activeDescription = `diagram ${name} (${grades.join("+")})`;
+
+          const run = (command: string, args: string[], options?: { timeout?: number }) => pi.exec(command, args, options);
+          let chrome: string | undefined;
+          let chromeResolved = false;
+
+          try {
+            for (const grade of grades) {
+              const result = await polishDiagram({
+                grade,
+                view,
+                source,
+                seed,
+                maxTokens: config.maxTokens,
+                signal: controller.signal,
+                complete: (options) => completeTextWithPiModel(ctx, options),
+                validate: async (code) => {
+                  if (!chromeResolved) {
+                    chrome = await findChrome(run);
+                    chromeResolved = true;
+                  }
+                  const outcome = await validateMermaid(code, view, { run, vendorDir: vendor, chrome: chrome ?? null });
+                  return outcome.result;
+                },
+                onProgress: (message) => onUpdate?.({
+                  content: [{ type: "text", text: message }],
+                  details: { dml: display, grades, name },
+                }),
+              });
+              await writeSidecar(diagrams, name, grade, result.code);
+            }
+
+            const build = await buildViewer({
+              cwd: ctx.cwd,
+              templateText,
+              vendorAssetPath: viewerVendorAssetPath(),
+              extraPaths: [sourcePath],
+            });
+            const opened = ctx.hasUI
+              ? await openViewerInBrowser(pi, build.viewerPath, name, grades[0] ?? "presentation")
+              : false;
+            const viewer = displayPath(ctx.cwd, build.viewerPath);
+            const text = `Created ${grades.join(" + ")}-grade diagram for ${display}. Viewer: ${viewer}${opened ? " (opened in your browser)" : ""}`;
+            return {
+              content: [{ type: "text", text }],
+              details: { success: true, dml: display, grades, name, viewer, opened, chrome: Boolean(chrome) },
+            };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { content: [{ type: "text", text: `dc_diagram failed: ${message}` }], details: { success: false, error: message } };
+          } finally {
+            signal?.removeEventListener("abort", cancel);
+            activeController = undefined;
+            activeDescription = undefined;
+          }
+        },
+      });
+      diagramToolRegistered = true;
+    }
+
+    const activeTools = pi.getActiveTools();
+    if (!activeTools.includes(DC_DIAGRAM_TOOL)) {
+      pi.setActiveTools([...activeTools, DC_DIAGRAM_TOOL]);
+    }
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     const config = await loadConfig(getPaths(ctx.cwd).config);
     setModelToolActive(config.modelToolEnabled);
+    setDiagramToolActive();
   });
 
   pi.on("tool_execution_start", (event) => {
@@ -590,6 +743,9 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         `Plans: ${path.relative(ctx.cwd, paths.plans)}`,
         `Context: ${config.contextMode} (verbose default: ${config.verbose})`,
         `Model tool (${DC_RUN_TOOL}): ${config.modelToolEnabled && pi.getActiveTools().includes(DC_RUN_TOOL) ? "enabled" : "disabled"}`,
+        `Model tool (${DC_DIAGRAM_TOOL}): ${pi.getActiveTools().includes(DC_DIAGRAM_TOOL) ? "enabled" : "disabled"}`,
+        "Ask pi for a presentation-grade or specification-grade diagram of any .dml file;",
+        "it writes the viewer under .pi/deepclause/diagrams/ and opens it.",
         "Commands:",
         "  /dc-list",
         "  /dc-plan <request> [--name=slug]   create an executable contextual DML plan",

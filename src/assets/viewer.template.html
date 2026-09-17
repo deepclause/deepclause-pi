@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Cache-Control" content="no-store" />
+<title>DML flowcharts</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #dfe3e8; --ink: #1f2933;
+    --muted: #6b7280; --accent: #0b7285; --accent-soft: #e0f7fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink); background: var(--bg);
+    display: grid; grid-template-columns: 250px 1fr; grid-template-rows: auto 1fr;
+    grid-template-areas: "head head" "aside main";
+  }
+  header {
+    grid-area: head; display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .spacer, .toolbar .spacer, .tabs .spacer { flex: 1; }
+  button, select {
+    font: inherit; padding: 5px 10px; border: 1px solid var(--line);
+    background: var(--panel); border-radius: 7px; color: var(--ink); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  aside {
+    grid-area: aside; border-right: 1px solid var(--line); background: var(--panel);
+    overflow: auto; padding: 8px;
+  }
+  aside .item {
+    display: block; width: 100%; text-align: left; padding: 8px 10px; margin: 2px 0;
+    border-radius: 8px; border: 1px solid transparent; background: transparent; cursor: pointer;
+  }
+  aside .item:hover { background: var(--bg); }
+  aside .item.active { background: var(--accent-soft); border-color: var(--accent); }
+  aside .item small { display: block; color: var(--muted); font-size: 11px; }
+  main { grid-area: main; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .toolbar {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .content { flex: 1; display: flex; min-height: 0; }
+  #preview {
+    flex: 1; overflow: auto; padding: 24px; background:
+      repeating-conic-gradient(#0000 0 25%, #00000005 0 50%) 0/24px 24px;
+  }
+  #preview svg { max-width: none; height: auto; }
+
+  /* --- split pane --- */
+  #side {
+    width: 42%; min-width: 260px; max-width: 72%;
+    border-left: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; min-height: 0;
+    resize: horizontal; overflow: hidden;
+  }
+  #side.hidden { display: none; }
+  .tabs {
+    display: flex; align-items: center; gap: 4px;
+    padding: 6px 8px; border-bottom: 1px solid var(--line);
+  }
+  .tabs .tab {
+    border: 1px solid transparent; background: transparent; padding: 4px 9px;
+    border-radius: 7px; color: var(--muted);
+  }
+  .tabs .tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .pane { flex: 1; min-height: 0; display: none; }
+  .pane.active { display: flex; flex-direction: column; }
+  #editor {
+    flex: 1; width: 100%; border: 0; resize: none; padding: 10px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); background: var(--panel);
+  }
+  #editor:focus { outline: none; }
+  #dmlView {
+    flex: 1; margin: 0; overflow: auto; padding: 10px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre; tab-size: 2;
+  }
+  .pane .hint { padding: 6px 10px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--line); }
+  .err {
+    display: none; margin: 0 0 16px; padding: 10px 12px; border-radius: 8px;
+    background: #fff1f2; border: 1px solid #f1aeb5; color: #9f1239; white-space: pre-wrap;
+    font: 12px/1.5 ui-monospace, Menlo, monospace;
+  }
+  .err.show { display: block; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>DML flowcharts</h1>
+    <span class="sub">generated __GENERATED__</span>
+    <span class="spacer"></span>
+    <label class="sub">view
+      <select id="view" autocomplete="off"></select>
+    </label>
+    <label class="sub">theme
+      <select id="theme">
+        <option value="default">default</option>
+        <option value="forest">forest</option>
+        <option value="neutral">neutral</option>
+        <option value="dark">dark</option>
+      </select>
+    </label>
+    <button id="toggleSide">Source</button>
+    <button id="exportSvg">SVG</button>
+    <button class="primary" id="exportPng">PNG</button>
+  </header>
+
+  <aside id="list"></aside>
+
+  <main>
+    <div class="toolbar">
+      <strong id="title">—</strong>
+      <span class="sub" id="path"></span>
+      <span class="spacer"></span>
+      <button id="copy">Copy mermaid</button>
+      <button id="render">Re-render</button>
+    </div>
+    <div class="content">
+      <div id="preview"><div class="empty">Select a diagram</div></div>
+      <div id="side">
+        <div class="tabs">
+          <button class="tab" data-tab="mermaid">Mermaid</button>
+          <button class="tab active" data-tab="dml">DML</button>
+          <span class="spacer"></span>
+          <button id="collapseSide" title="Hide pane">›</button>
+        </div>
+        <div class="pane" id="paneMermaid">
+          <div class="hint">Edit the Mermaid, then Re-render (Ctrl/Cmd+Enter).</div>
+          <textarea id="editor" spellcheck="false"></textarea>
+        </div>
+        <div class="pane active" id="paneDml">
+          <pre id="dmlView"></pre>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const DIAGRAMS = __DIAGRAMS_JSON__;
+  </script>
+  <script>
+    function ensureMermaid(cb) {
+      if (window.mermaid) return cb();
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+      s.onload = cb;
+      s.onerror = () => { document.getElementById('preview').innerHTML =
+        '<div class="err show">Mermaid failed to load (no vendor copy and no network).</div>'; };
+      document.head.appendChild(s);
+    }
+
+    const el = (id) => document.getElementById(id);
+    let current = -1;
+    let svgText = '';
+    let pendingView = null;
+    let viewInitialized = false;
+
+    function init() {
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: el('theme').value,
+        flowchart: { htmlLabels: true, useMaxWidth: false } });
+      pendingView = new URLSearchParams(location.search).get('view');
+      buildList();
+      const wanted = decodeURIComponent(location.hash.replace(/^#/, ''));
+      const idx = DIAGRAMS.findIndex((d) => d.name === wanted);
+      if (DIAGRAMS.length) select(idx >= 0 ? idx : 0);
+    }
+
+    function setViewOptions(d) {
+      const sel = el('view');
+      const opts = [];
+      if (d.presentation) opts.push(['presentation', 'Presentation']);
+      if (d.specification) opts.push(['specification', 'Specification']);
+      opts.push(['flow', 'Flow']);
+      if (d.seq) opts.push(['sequence', 'Sequence']);
+      const available = opts.map(([v]) => v);
+      let wanted = viewInitialized ? sel.value : '';
+      if (pendingView && available.includes(pendingView)) wanted = pendingView;
+      pendingView = null;
+      if (!available.includes(wanted)) {
+        wanted = available.includes('presentation') ? 'presentation' : (available.includes('specification') ? 'specification' : 'flow');
+      }
+      sel.innerHTML = opts.map(([v, t]) => '<option value="' + v + '">' + t + '</option>').join('');
+      sel.value = wanted;
+      viewInitialized = true;
+    }
+
+    function buildList() {
+      const list = el('list');
+      list.innerHTML = '';
+      DIAGRAMS.forEach((d, i) => {
+        const b = document.createElement('button');
+        b.className = 'item' + (i === current ? ' active' : '');
+        b.innerHTML = '<span></span><small></small>';
+        b.firstChild.textContent = d.name;
+        b.lastChild.textContent = d.path;
+        b.onclick = () => select(i);
+        list.appendChild(b);
+      });
+    }
+
+    function codeFor(d) {
+      const v = el('view').value;
+      if (v === 'presentation' && d.presentation) return d.presentation;
+      if (v === 'specification' && d.specification) return d.specification;
+      if (v === 'sequence' && d.seq) return d.seq;
+      return d.flow;
+    }
+
+    function select(i) {
+      current = i;
+      const d = DIAGRAMS[i];
+      location.hash = d.name;
+      el('title').textContent = d.name + '.dml';
+      el('path').textContent = d.path;
+      setViewOptions(d);
+      el('editor').value = codeFor(d);
+      el('dmlView').textContent = d.dml || '(DML source not embedded — rebuild the viewer)';
+      buildList();
+      render();
+    }
+
+    async function render() {
+      const code = el('editor').value;
+      try {
+        const out = await mermaid.render('g' + Date.now(), code);
+        svgText = out.svg;
+        el('preview').innerHTML = svgText;
+      } catch (e) {
+        svgText = '';
+        el('preview').innerHTML = '<div class="err show"></div>';
+        el('preview').querySelector('.err').textContent = String(e && e.message || e);
+      }
+    }
+
+    function reinit() {
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: el('theme').value,
+        flowchart: { htmlLabels: true, useMaxWidth: false } });
+      render();
+    }
+
+    function setTab(name) {
+      document.querySelectorAll('.tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+      el('paneMermaid').classList.toggle('active', name === 'mermaid');
+      el('paneDml').classList.toggle('active', name === 'dml');
+    }
+
+    function download(blob, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+
+    const currentName = () => (DIAGRAMS[current] ? DIAGRAMS[current].name : 'diagram');
+
+    function exportSvg() {
+      if (!svgText) return;
+      const clone = el('preview').querySelector('svg').cloneNode(true);
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      const data = new XMLSerializer().serializeToString(clone);
+      download(new Blob([data], { type: 'image/svg+xml;charset=utf-8' }), currentName() + '.svg');
+    }
+
+    async function exportPng() {
+      const svg = el('preview').querySelector('svg');
+      if (!svg) return;
+      const clone = svg.cloneNode(true);
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      const w = parseFloat(svg.getAttribute('width')) || svg.getBoundingClientRect().width;
+      const h = parseFloat(svg.getAttribute('height')) || svg.getBoundingClientRect().height;
+      clone.setAttribute('width', w); clone.setAttribute('height', h);
+      const data = new XMLSerializer().serializeToString(clone);
+      const url = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(data)));
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+      const scale = 2;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(w * scale); canvas.height = Math.ceil(h * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = el('theme').value === 'dark' ? '#1e1e1e' : '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob((b) => download(b, currentName() + '.png'), 'image/png');
+    }
+
+    el('theme').onchange = reinit;
+    el('view').onchange = () => { if (current >= 0) { el('editor').value = codeFor(DIAGRAMS[current]); render(); } };
+    el('toggleSide').onclick = () => el('side').classList.toggle('hidden');
+    el('collapseSide').onclick = () => el('side').classList.add('hidden');
+    document.querySelectorAll('.tabs .tab').forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
+    el('render').onclick = render;
+    el('exportSvg').onclick = exportSvg;
+    el('exportPng').onclick = exportPng;
+    el('copy').onclick = async () => {
+      const text = el('editor').value;
+      try { await navigator.clipboard.writeText(text); }
+      catch { el('editor').select(); document.execCommand('copy'); }
+      el('copy').textContent = 'Copied'; setTimeout(() => el('copy').textContent = 'Copy mermaid', 1200);
+    };
+    el('editor').addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); render(); }
+    });
+
+    window.addEventListener('DOMContentLoaded', () => ensureMermaid(init));
+  </script>
+  <script src="vendor/mermaid.min.js"></script>
+</body>
+</html>
