@@ -1,0 +1,10 @@
+% spec_scaffold — draft a tasks.dml for a change from its delta scenarios (read-only).
+% Usage: /dc-run spec_scaffold <change>
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main(Change) :-
+    sp_scaffold(Change, Draft),
+    answer(Draft).
+
+agent_main :-
+    answer("usage: /dc-run spec_scaffold <change>").

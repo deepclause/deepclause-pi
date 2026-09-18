@@ -361,7 +361,10 @@ sp_check_all(Report) :-
     findall(Summary, (member(F, DeltaFiles), sp_read_check_delta(F, Summary, _)), DeltaSummaries),
     findall(E, (member(F, SpecFiles), sp_read_check_spec(F, _, Es), member(E, Es)), SpecErrors),
     findall(E, (member(F, DeltaFiles), sp_read_check_delta(F, _, Es), member(E, Es)), DeltaErrors),
-    append(SpecErrors, DeltaErrors, Errors),
+    append(SpecErrors, DeltaErrors, BaseErrors),
+    findall(Line, (member(Dir, ChangeDirs), sp_coverage_line(Dir, Line)), CoverageLines),
+    findall(E, (member(Dir, ChangeDirs), sp_coverage_errors(Dir, Es), member(E, Es)), CoverageErrors),
+    append(BaseErrors, CoverageErrors, Errors),
     length(Errors, ErrorCount),
     (   ErrorCount =:= 0 -> Status = "OK" ; Status = "FAILED" ),
     length(SpecFiles, CapCount),
@@ -372,7 +375,9 @@ sp_check_all(Report) :-
     append([Header], SpecSummaries, L1),
     append(L1, DeltaSummaries, L2),
     append(L2, [""], L3),
-    append(L3, ErrorBlock, Body),
+    append(L3, CoverageLines, L4),
+    append(L4, [""], L5),
+    append(L5, ErrorBlock, Body),
     atomics_to_string(Body, "\n", Report).
 
 sp_status(Report) :-
@@ -704,3 +709,183 @@ sp_archive_render(Change, Mode, Results, Lines) :-
     ;   Body = ResultLines
     ),
     append([Header, ""], Body, Lines).
+
+%% ---------------------------------------------------------------------------
+%% Tasks and scenario coverage (phase 3)
+%%
+%% tasks.dml holds `plan_task/2` facts. The functor is deliberately not
+%% `task/2`, which collides with DML's built-in task/N predicate and makes the
+%% term un-unifiable. Completion state uses `plan_task_status/2`.
+%% ---------------------------------------------------------------------------
+
+sp_read_terms(Path, Terms) :-
+    (   catch(open(Path, read, Stream), _, fail)
+    ->  sp_read_terms_loop(Stream, Terms),
+        close(Stream)
+    ;   Terms = []
+    ).
+
+sp_read_terms_loop(Stream, Terms) :-
+    catch(read(Stream, Term), _, Term = end_of_file),
+    (   Term == end_of_file
+    ->  Terms = []
+    ;   Terms = [Term|Rest],
+        sp_read_terms_loop(Stream, Rest)
+    ).
+
+sp_tasks(ChangeDir, Tasks) :-
+    atomic_list_concat([ChangeDir, "/tasks.dml"], Path),
+    sp_read_terms(Path, Terms),
+    findall(plan_task(Id, Props), (
+        member(Term, Terms),
+        Term = plan_task(Id, Props),
+        is_dict(Props)
+    ), Tasks).
+
+sp_task_satisfies(Props, Ids) :- catch(get_dict(satisfies, Props, Ids), _, Ids = []).
+sp_task_checks(Props, Checks) :- catch(get_dict(checks, Props, Checks), _, Checks = []).
+
+%% Slug and scenario ids: "User toggles dark mode" -> "user-toggles-dark-mode".
+sp_char_alnum(C) :- char_code(C, Code), Code >= 97, Code =< 122, !.
+sp_char_alnum(C) :- char_code(C, Code), Code >= 48, Code =< 57, !.
+
+sp_slug_chars([], []).
+sp_slug_chars([C|Chars], [Mapped|Rest]) :-
+    (   sp_char_alnum(C)
+    ->  Mapped = C
+    ;   Mapped = "-"
+    ),
+    sp_slug_chars(Chars, Rest).
+
+sp_keep_nonempty([], []).
+sp_keep_nonempty([Part|Parts], Out) :-
+    (   Part == ""
+    ->  Out = Rest
+    ;   Out = [Part|Rest]
+    ),
+    sp_keep_nonempty(Parts, Rest).
+
+sp_slug(Text, Slug) :-
+    string_lower(Text, Lower),
+    string_chars(Lower, Chars),
+    sp_slug_chars(Chars, Mapped),
+    atomics_to_string(Mapped, Raw),
+    split_string(Raw, "-", "-", Parts0),
+    sp_keep_nonempty(Parts0, Parts),
+    atomics_to_string(Parts, "-", Slug).
+
+sp_scenario_id(Capability, Name, Id) :-
+    sp_slug(Name, Slug),
+    atomics_to_string([Capability, "#", Slug], Id).
+
+sp_delta_scenarios_named(Deltas, Capability, Pairs) :-
+    findall(Id-Name, (
+        member(delta(Op, Reqs), Deltas),
+        ( Op == added ; Op == modified ),
+        member(req(_, _, _, Scenarios), Reqs),
+        member(scenario(Name, _, _), Scenarios),
+        sp_scenario_id(Capability, Name, Id)
+    ), Pairs).
+
+sp_delta_scenario_ids(Deltas, Capability, Ids) :-
+    sp_delta_scenarios_named(Deltas, Capability, Pairs),
+    findall(Id, member(Id-_, Pairs), Ids).
+
+sp_covered(Tasks, Id) :-
+    member(plan_task(_, Props), Tasks),
+    sp_task_satisfies(Props, Ids),
+    memberchk(Id, Ids).
+
+%% Scenarios, tasks, uncovered scenarios, tasks without checks, orphan satisfies.
+sp_coverage(ChangeDir, Scenarios, Tasks, Uncovered, NoCheck, Orphan) :-
+    sp_tasks(ChangeDir, Tasks),
+    sp_change_delta_files(ChangeDir, DeltaFiles),
+    findall(Id, (
+        member(File, DeltaFiles),
+        sp_capability_id(File, Capability),
+        read_file_to_string(File, Text, []),
+        sp_parse_delta_full(Text, _, Deltas),
+        sp_delta_scenario_ids(Deltas, Capability, Ids),
+        member(Id, Ids)
+    ), RawScenarios),
+    sort(RawScenarios, Scenarios),
+    findall(Id, (member(Id, Scenarios), \+ sp_covered(Tasks, Id)), Uncovered0),
+    sort(Uncovered0, Uncovered),
+    findall(TaskId, (
+        member(plan_task(TaskId, Props), Tasks),
+        sp_task_checks(Props, Checks),
+        Checks == []
+    ), NoCheck0),
+    sort(NoCheck0, NoCheck),
+    findall(Sat, (
+        member(plan_task(_, Props), Tasks),
+        sp_task_satisfies(Props, Sats),
+        member(Sat, Sats),
+        \+ memberchk(Sat, Scenarios)
+    ), Orphan0),
+    sort(Orphan0, Orphan).
+
+sp_coverage_line(ChangeDir, Line) :-
+    file_base_name(ChangeDir, Name),
+    sp_coverage(ChangeDir, Scenarios, Tasks, Uncovered, NoCheck, _),
+    length(Scenarios, ScenarioCount),
+    length(Tasks, TaskCount),
+    length(Uncovered, UncoveredCount),
+    length(NoCheck, NoCheckCount),
+    Covered is ScenarioCount - UncoveredCount,
+    (   TaskCount =:= 0
+    ->  format(string(Line), "coverage ~w: no tasks.dml yet (~w scenarios)", [Name, ScenarioCount])
+    ;   format(string(Line), "coverage ~w: ~w/~w scenarios covered, ~w tasks, ~w without checks",
+               [Name, Covered, ScenarioCount, TaskCount, NoCheckCount])
+    ).
+
+sp_coverage_errors(ChangeDir, Errors) :-
+    sp_tasks(ChangeDir, Tasks),
+    (   Tasks == []
+    ->  Errors = []
+    ;   sp_coverage(ChangeDir, _, _, Uncovered, NoCheck, _),
+        atomic_list_concat([ChangeDir, "/tasks.dml"], File),
+        findall(error(File, 0, Message), (
+            member(Id, Uncovered),
+            format(string(Message), "no task satisfies scenario ~w", [Id])
+        ), E1),
+        findall(error(File, 0, Message), (
+            member(Id, NoCheck),
+            format(string(Message), "task ~w declares no verification check", [Id])
+        ), E2),
+        append(E1, E2, Errors)
+    ).
+
+%% Draft tasks.dml scaffold (read-only).
+sp_scaffold_tasks([], _, []).
+sp_scaffold_tasks([Id-Name|Rest], N, Lines) :-
+    format(string(TaskId), "1.~w", [N]),
+    format(string(Do), "Implement: ~w", [Name]),
+    format(string(Expected), "The scenario ~w holds.", [Id]),
+    format(string(Block),
+        "plan_task(\"~w\", task{\\n    executor:  pi,\\n    do:        \"~w\",\\n    tools:     [\"read\", \"edit\"],\\n    expected:  \"~w\",\\n    satisfies: [\"~w\"],\\n    checks:    []\\n}).",
+        [TaskId, Do, Expected, Id]),
+    N1 is N + 1,
+    sp_scaffold_tasks(Rest, N1, RestLines),
+    Lines = [Block, ""|RestLines].
+
+sp_scaffold(Change, Draft) :-
+    atomic_list_concat([".pi/deepclause/changes/", Change], ChangeDir),
+    sp_change_delta_files(ChangeDir, DeltaFiles),
+    findall(Id-Name, (
+        member(File, DeltaFiles),
+        sp_capability_id(File, Capability),
+        read_file_to_string(File, Text, []),
+        sp_parse_delta_full(Text, _, Deltas),
+        sp_delta_scenarios_named(Deltas, Capability, Pairs),
+        member(Id-Name, Pairs)
+    ), Pairs),
+    sp_scaffold_tasks(Pairs, 1, TaskLines),
+    format(string(Header), "% tasks.dml — draft scaffold for change ~w", [Change]),
+    append([
+        Header,
+        "% Fill in executor, tools, expected and checks, then run /dc-check.",
+        ""
+    ], TaskLines, All),
+    atomics_to_string(All, "\n", Draft0),
+    string_concat(Draft0, "\n", Draft).

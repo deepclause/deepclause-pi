@@ -18,9 +18,16 @@ Unchanged requirement blocks are preserved line-for-line. The archive *move* is
 done host-side because directory `rename_file/2` is unreliable in the WASM
 filesystem. `RENAMED` deltas are refused for now.
 
-Not yet implemented: `tasks.dml` / `apply.dml`, the `deltas.dml` / `index.dml`
-files, coverage and discoverability gates in `validatePlanSpec`, and the
-apply-time rollback path.
+Implemented in phase 3: `tasks.dml` as a first-class artifact (`plan_task/2`
+facts read with native term I/O), scenario coverage reporting (`spec_coverage.dml`
+and a coverage section in `/dc-check`), and a read-only `spec_scaffold.dml` that
+drafts one task per delta scenario. Note the `plan_task` naming: `task/2` collides
+with DML's built-in `task/N`.
+
+Not yet implemented: `/dc-plan` writing change folders and `tasks.dml`/`apply.dml`,
+the `deltas.dml` / `index.dml` files, concrete verification gates and the
+per-task verify/retry/rollback driver (`lib/apply.dml`, `dc_verify_run`,
+`dc_apply_snapshot`/`dc_apply_restore`), and `RENAMED` support in merge.
 
 It builds directly on [DC_PLAN_PROPOSAL.md](DC_PLAN_PROPOSAL.md), which describes
 the shipped `/dc-plan` + `pi_agent_step` architecture. This document does not
@@ -181,7 +188,7 @@ changes/add_dark_mode/
 ├── specs/ui/theme.spec.md      # pi, normal tools — behavior only
 ├── design.md                   # pi, normal tools
 ├── deltas.dml                  # emitted: delta ops + delta_status(pending)
-├── tasks.dml                   # emitted: task/2 definitions + task_status(pending)
+├── tasks.dml                   # emitted: plan_task/2 definitions + plan_task_status/2
 └── apply.dml                   # emitted: entry + "% Required pi tools:" metadata
 ```
 
@@ -338,7 +345,7 @@ back to the delta's scenario ids, and every task declares at least one check:
 % tasks.dml — implementation plan for change add_dark_mode
 % Plan format: 2
 
-task("1.1", task{
+plan_task("1.1", task{
     executor:  pi,
     do:        "Add a ThemeProvider context exposing theme and setTheme.",
     tools:     ["read", "edit"],
@@ -348,7 +355,7 @@ task("1.1", task{
                  cmd("npm run typecheck") ]
 }).
 
-task("1.2", task{
+plan_task("1.2", task{
     executor:  pi,
     do:        "Add light/dark CSS custom properties and apply them to the document root.",
     tools:     ["read", "edit"],
@@ -357,7 +364,7 @@ task("1.2", task{
     checks:    [ cmd("npx vitest run src/theme") ]
 }).
 
-task("1.3", task{
+plan_task("1.3", task{
     executor:  pi,
     do:        "Default to prefers-color-scheme when nothing is stored, without persisting.",
     tools:     ["read", "edit"],
@@ -366,7 +373,7 @@ task("1.3", task{
     checks:    [ cmd("npx vitest run src/theme") ]
 }).
 
-task("1.4", task{
+plan_task("1.4", task{
     executor:  pi,
     do:        "Reject a stored value that is neither light nor dark, falling back to the system preference.",
     tools:     ["read", "edit"],
@@ -375,7 +382,7 @@ task("1.4", task{
     checks:    [ cmd("npx vitest run src/theme") ]
 }).
 
-task("1.5", task{
+plan_task("1.5", task{
     executor:  pi,
     do:        "Add the theme toggle to the header.",
     tools:     ["read", "edit"],
@@ -386,11 +393,11 @@ task("1.5", task{
 }).
 
 % --- execution state (managed by apply.dml; do not edit by hand) ---
-task_status("1.1", pending).
-task_status("1.2", pending).
-task_status("1.3", pending).
-task_status("1.4", pending).
-task_status("1.5", pending).
+plan_task_status("1.1", pending).
+plan_task_status("1.2", pending).
+plan_task_status("1.3", pending).
+plan_task_status("1.4", pending).
+plan_task_status("1.5", pending).
 ```
 
 `apply.dml` — only wiring and the metadata `/dc-run` preflight reads, so the plan
@@ -496,7 +503,7 @@ errors` (a planning turn that edits the Markdown and re-commits the plan) and ru
 3. **Per task, in order:** delegate the step through `pi_agent_step`, which swaps in
    exactly that step's tools and restores the previous tool set on every exit path;
    then run the task's checks through `dc_verify_run` (restricted to the approved
-   commands). On success, write `task_status(Id, done(N))` into the managed block of
+   commands). On success, write `plan_task_status(Id, done(N))` into the managed block of
    `tasks.dml` and move on.
 4. **On a failed check:** append the failure evidence to the *next* attempt's
    instruction ("the previous attempt failed verification with: … fix only what is
@@ -521,11 +528,11 @@ errors` (a planning turn that edits the Markdown and re-commits the plan) and ru
 
 ```prolog
 % --- execution state (managed by apply.dml; do not edit by hand) ---
-task_status("1.1", done(1)).
-task_status("1.2", done(2)).
-task_status("1.3", done(1)).
-task_status("1.4", done(1)).
-task_status("1.5", done(1)).
+plan_task_status("1.1", done(1)).
+plan_task_status("1.2", done(2)).
+plan_task_status("1.3", done(1)).
+plan_task_status("1.4", done(1)).
+plan_task_status("1.5", done(1)).
 ```
 
 ### 5. Revise — `/dc-plan update`
@@ -817,11 +824,13 @@ meaning.
 ├── skills/
 │   ├── spec_validate.dml
 │   ├── spec_merge.dml
+│   ├── spec_archive.dml
+│   ├── spec_coverage.dml
 │   ├── spec_status.dml
 │   ├── spec_query.dml
-│   ├── spec_reindex.dml
+│   ├── spec_reindex.dml         # planned
 │   ├── spec_graph.dml
-│   ├── spec_sync.dml
+│   ├── spec_sync.dml            # planned
 │   └── spec_scaffold.dml
 ├── plans/                       # standalone plans not tied to a change
 ├── diagrams/
@@ -1069,12 +1078,15 @@ the host shell and must run unattended. There is no pure-Prolog substitute.
 
 ### `tasks.dml` — implementation plan and execution state
 
-Data only. Definitions in `task/2`, state in `task_status/2`, joined by task id:
+Data only. Definitions in `plan_task/2`, state in `plan_task_status/2`, joined by task id.
+The fact functor is `plan_task/2`, **not** `task/2`: `task/2` collides with DML's
+built-in `task/N` predicate, and a term read from the file then refuses to unify
+with `task(Id, Props)`. This was found while implementing phase 3.
 
 ```prolog
 % tasks.dml — implementation plan for change add_dark_mode
 
-task("1.1", task{
+plan_task("1.1", task{
     executor:  pi,
     do:        "Add a ThemeProvider context exposing theme and setTheme.",
     tools:     ["read", "edit"],
@@ -1084,7 +1096,7 @@ task("1.1", task{
                  cmd("npm run typecheck") ]
 }).
 
-task("1.2", task{
+plan_task("1.2", task{
     executor:  pi,
     do:        "Add light/dark CSS custom properties applied to the document root.",
     tools:     ["read", "edit"],
@@ -1094,18 +1106,18 @@ task("1.2", task{
 }).
 
 % --- execution state (managed by apply.dml; do not edit by hand) ---
-task_status("1.1", pending).
-task_status("1.2", pending).
+plan_task_status("1.1", pending).
+plan_task_status("1.2", pending).
 ```
 
 Status is a plain compound term, chosen over a dict so it is trivial to match,
 write, and round-trip:
 
 ```prolog
-task_status("1.5", pending).
-task_status("1.1", done(1)).                                    % verified on attempt 1
-task_status("1.2", failed(3, "vitest: 1 failing (ThemeProvider.test.tsx:42)")).
-task_status("1.3", skipped("subsumed by 1.1")).
+plan_task_status("1.5", pending).
+plan_task_status("1.1", done(1)).                                    % verified on attempt 1
+plan_task_status("1.2", failed(3, "vitest: 1 failing (ThemeProvider.test.tsx:42)")).
+plan_task_status("1.3", skipped("subsumed by 1.1")).
 ```
 
 Rules:
@@ -1117,8 +1129,8 @@ Rules:
 - Progress is a query, not a separate file:
 
 ```prolog
-remaining(Id) :- task(Id, _), \+ task_status(Id, done(_)).
-all_done      :- forall(task(Id, _), task_status(Id, done(_))).
+remaining(Id) :- plan_task(Id, _), \+ plan_task_status(Id, done(_)).
+all_done      :- forall(plan_task(Id, _), plan_task_status(Id, done(_))).
 ```
 
 OpenSpec's "all tasks complete" archive check becomes `all_done`.
@@ -1160,7 +1172,7 @@ Write: a **managed marker block**, so the driver never touches the definitions:
 record_status(TasksPath, Id, Status) :-
     read_file_to_string(TasksPath, Text, []),
     split_managed_block(Text, Head, _OldBlock),        % split at the marker comment
-    findall(Id-S, ( task(Id0, _), task_status(Id0, S), Id = Id0 ), Statuses),
+    findall(Id-S, ( plan_task(Id0, _), plan_task_status(Id0, S), Id = Id0 ), Statuses),
     render_status_block(Statuses, Block),
     atomic_write(TasksPath, Head, Block).              % temp file + rename
 ```
@@ -1173,7 +1185,7 @@ Properties this buys:
 - **Crash-safe resume.** Write after each *verified* task, so an interrupted run
   leaves the block reflecting the last completed task, and `remaining/1` resumes.
 - **No fragile round-tripping.** The driver never parses and re-renders DML dicts;
-  it only serializes `task_status/2` facts, which is trivial.
+  it only serializes `plan_task_status/2` facts, which is trivial.
 - **Atomicity.** Temp file plus `rename_file/2`, so a crash mid-write cannot leave
   a truncated plan.
 
@@ -1258,7 +1270,7 @@ what result" without a sidecar evidence file.
 
 1. Markdown stays canonical for behavior. The definition half of `deltas.dml` and
    all of `index.dml` are derived; `delta_status/2` and `change_meta/1` are authored,
-   like `task_status/2`.
+   like `plan_task_status/2`.
 2. Every derived fact carries its source digest. Mismatch means stale.
 3. Stale means **regenerate**, never patch. Query skills refuse or auto-reindex on
    mismatch.
@@ -1452,11 +1464,11 @@ run_plan(TasksPath, Change, Max) :-
     final_report(Change).
 
 remaining_tasks(Ids) :-
-    findall(Id, (task(Id, _), \+ task_status(Id, done(_))), Ids).
+    findall(Id, (plan_task(Id, _), \+ plan_task_status(Id, done(_))), Ids).
 
 run_all(_, _, [], _).
 run_all(TasksPath, Change, [Id|Rest], Max) :-
-    task(Id, Step),
+    plan_task(Id, Step),
     run_task(TasksPath, Change, Id, Step, Max),
     run_all(TasksPath, Change, Rest, Max).
 
@@ -1744,7 +1756,7 @@ Serial foundation first — see the parallel strategy below.
 **Phase 0 (serial, prerequisite)**
 
 0.1 Freeze the contracts: normative `docs/SPEC_FORMAT.md` (grammar, term schema,
-    error codes), `change.json` schema + `schemaVersion`, the `task`/`task_status`
+    error codes), `change.json` schema + `schemaVersion`, the `plan_task`/`plan_task_status`
     shapes, and the `dc_plan_commit` payload v2.
 0.2 Build the test harness: grammar conformance corpus, golden merge files, a
     recording/replay LLM backend, an extension harness with a scriptable `pi` fake.
@@ -1818,7 +1830,7 @@ out after that.
 
 **What parallelization will not fix:** the human remains the integrator; the
 conformance corpus is what lets workers self-check instead of asking; cross-cutting
-`PlanSpec`/`task_status` changes must stay single-owner; integration testing is
+`PlanSpec`/`plan_task_status` changes must stay single-owner; integration testing is
 serial and needs a dedicated window.
 
 ## Decisions log
@@ -1831,7 +1843,7 @@ serial and needs a dedicated window.
 | Embedded executable `prolog` blocks in specs | **Rejected.** Both clause embedding (supply-chain risk) and annotation mini-syntaxes (second grammar, hidden from review). Checks are declarative data terms in `tasks.dml`. |
 | `tasks.md` (Markdown task list) | **Rejected.** A redundant view of the plan; drift surface. Replaced by `tasks.dml`. |
 | Single DML file holding tasks + driver + metadata | **Rejected for now.** `tasks.dml` (content) and `apply.dml` (wiring + preflight metadata) have different owners and change rates. Revisit in open question 13. |
-| `change.json.completed` progress record | **Rejected.** Progress belongs in `tasks.dml` as `task_status/2`, queryable and diffable. |
+| `change.json.completed` progress record | **Rejected.** Progress belongs in `tasks.dml` as `plan_task_status/2`, queryable and diffable. |
 | Status as a dict | **Rejected.** Compound terms (`done(1)`, `failed(3, E)`) match, write, and round-trip trivially. |
 | Read/write `tasks.dml` via a runtime tool | **Rejected.** Native Prolog file I/O with a managed marker block is sufficient and keeps logic in DML. |
 | Git worktree for runtime apply isolation | **Rejected** while pi has no per-turn cwd override; use snapshot + restore in place. (Worktrees remain correct for parallel development.) |

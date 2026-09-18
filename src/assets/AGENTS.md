@@ -420,6 +420,11 @@ Validate and inspect without spending model tokens:
 - `/dc-run spec_query <capability>` — one capability's requirements and scenarios.
 - `/dc-run spec_graph capabilities|changes` — deterministic Mermaid graph.
 - `/dc-run spec_merge <change>` — preview the delta merge into `specs/` (read-only).
+- `/dc-run spec_coverage <change>` — which delta scenarios are covered by `tasks.dml`,
+  which tasks lack checks, and which `satisfies` ids are unknown. `/dc-check` reports the
+  same coverage and treats uncovered scenarios as errors once a `tasks.dml` exists.
+- `/dc-run spec_scaffold <change>` — print a draft `tasks.dml` with one task per delta
+  scenario (read-only; fill in executor, tools, expected and checks).
 - `/dc-archive <change>` — show the preview, confirm, write the merged spec, then move the
   change to `changes/archive/`. The DML step (`spec_archive.dml`) is marked `% Mutating: true`,
   so `/dc-run` refuses it directly; always archive through `/dc-archive` so the merge is reviewed

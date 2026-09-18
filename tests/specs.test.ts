@@ -400,3 +400,73 @@ describe("dc-archive command", () => {
     expect(archiveEntries.some((entry) => entry.endsWith("add_dark_mode"))).toBe(true);
   });
 });
+
+const COVERAGE_DELTA = `---
+change: add_dark_mode
+---
+
+# Spec Delta
+
+## ADDED Requirements
+
+### Requirement: Theme selection
+The app SHALL switch themes.
+
+#### Scenario: User toggles dark mode
+- **WHEN** the user toggles
+- **THEN** the theme changes
+
+#### Scenario: Invalid stored value is rejected
+- **WHEN** a stored value is invalid
+- **THEN** the system preference applies
+`;
+
+const TASKS_DML = `plan_task("1.1", task{
+    executor:  pi,
+    do:        "Add the toggle",
+    tools:     ["read", "edit"],
+    expected:  "The toggle switches themes.",
+    satisfies: ["ui/theme#user-toggles-dark-mode"],
+    checks:    [ exists("src/components/ThemeToggle.tsx") ]
+}).
+
+plan_task("1.2", task{
+    executor:  pi,
+    do:        "Handle invalid stored values",
+    tools:     ["read", "edit"],
+    expected:  "Invalid values fall back.",
+    satisfies: [],
+    checks:    []
+}).
+`;
+
+describe("task coverage and scaffold", () => {
+  it("reports uncovered scenarios and missing checks, and scaffolds tasks", async () => {
+    const cwd = await workspace({
+      ".pi/deepclause/changes/add_dark_mode/specs/ui/theme.spec.md": COVERAGE_DELTA,
+      ".pi/deepclause/changes/add_dark_mode/tasks.dml": TASKS_DML,
+    });
+
+    const coverage = await runLibrary(
+      cwd,
+      `atomic_list_concat([".pi/deepclause/changes/", "add_dark_mode"], Dir), sp_coverage(Dir, Scenarios, Tasks, Uncovered, NoCheck, Orphan), format(string(M), "S=~w|T=~w|U=~w|N=~w|O=~w", [Scenarios, Tasks, Uncovered, NoCheck, Orphan]), answer(M)`,
+    );
+    expect(coverage.errors).toEqual([]);
+    expect(coverage.answer).toContain("ui/theme#user-toggles-dark-mode");
+    expect(coverage.answer).toContain("ui/theme#invalid-stored-value-is-rejected");
+    expect(coverage.answer).toContain("U=[ui/theme#invalid-stored-value-is-rejected]");
+    expect(coverage.answer).toContain("N=[1.2]");
+
+    const check = await runLibrary(cwd, "sp_check_all(R), answer(R)");
+    expect(check.answer).toContain("spec check: FAILED");
+    expect(check.answer).toContain("coverage add_dark_mode: 1/2 scenarios covered, 2 tasks, 1 without checks");
+    expect(check.answer).toContain("no task satisfies scenario ui/theme#invalid-stored-value-is-rejected");
+    expect(check.answer).toContain("task 1.2 declares no verification check");
+
+    const scaffold = await runLibrary(cwd, `sp_scaffold("add_dark_mode", D), answer(D)`);
+    expect(scaffold.errors).toEqual([]);
+    expect(scaffold.answer).toContain('plan_task("1.1", task{');
+    expect(scaffold.answer).toContain('satisfies: ["ui/theme#user-toggles-dark-mode"]');
+    expect(scaffold.answer).toContain('satisfies: ["ui/theme#invalid-stored-value-is-rejected"]');
+  });
+});

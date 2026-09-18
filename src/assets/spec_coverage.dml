@@ -1,0 +1,26 @@
+% spec_coverage — scenario coverage of a change by its tasks.dml.
+% Usage: /dc-run spec_coverage <change>
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main(Change) :-
+    atomic_list_concat([".pi/deepclause/changes/", Change], ChangeDir),
+    sp_coverage(ChangeDir, Scenarios, Tasks, Uncovered, NoCheck, Orphan),
+    length(Scenarios, ScenarioCount),
+    length(Tasks, TaskCount),
+    length(Uncovered, UncoveredCount),
+    Covered is ScenarioCount - UncoveredCount,
+    format(string(Header), "scenario coverage ~w: ~w/~w covered, ~w tasks", [Change, Covered, ScenarioCount, TaskCount]),
+    (   Uncovered == []
+    ->  UncoveredLines = ["  all scenarios covered"]
+    ;   findall(Line, (member(Id, Uncovered), format(string(Line), "  uncovered: ~w", [Id])), UncoveredLines)
+    ),
+    findall(Line2, (member(Id, NoCheck), format(string(Line2), "  task without checks: ~w", [Id])), NoCheckLines),
+    findall(Line3, (member(Id, Orphan), format(string(Line3), "  satisfies unknown scenario: ~w", [Id])), OrphanLines),
+    append([Header], UncoveredLines, A),
+    append(A, NoCheckLines, B),
+    append(B, OrphanLines, Body),
+    atomics_to_string(Body, "\n", Report),
+    answer(Report).
+
+agent_main :-
+    answer("usage: /dc-run spec_coverage <change>").
