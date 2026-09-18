@@ -726,7 +726,12 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
     }
   };
 
-  const runSpecSkill = async (ctx: ExtensionContext, skill: string, args: string[] = []): Promise<string> => {
+  const runSpecSkill = async (
+    ctx: ExtensionContext,
+    skill: string,
+    args: string[] = [],
+    options: { verifyCommands?: string[]; piAgentStep?: boolean } = {},
+  ): Promise<string> => {
     const paths = await initializeWorkspace(ctx.cwd);
     const config = await loadConfig(paths.config);
     const filePath = await resolveDmlPath(paths, skill);
@@ -746,6 +751,8 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
           onEvent() {},
           onInput: async () => { throw new Error("spec skills do not request input"); },
         },
+        options.piAgentStep ? (request, signal) => runPiAgentStep(request, signal, ctx) : undefined,
+        options.verifyCommands ?? [],
       );
       if (result.errors.length) throw new Error(result.errors.join("\n"));
       return result.answer ?? "(no answer)";
@@ -848,6 +855,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         "  /dc-plan <request> [--name=slug]   create an executable contextual DML plan",
         "  /dc-check <change|spec>            validate specs and deltas deterministically",
         "  /dc-archive <change>              merge a change delta into specs/ and archive it",
+        "  /dc-apply <change>                execute a change's tasks.dml with verification",
         "  /dc-run <skill|path> [args] [--context=turn|branch|isolated]",
         "  /dc-run <skill|path> --verbose   show lifecycle events",
         "  /dc-run <skill|path> --debug     show full event payloads and SDK diagnostics",
@@ -1009,6 +1017,40 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         publishResult(pi, `Archive failed: ${message}`, { error: message });
+        ctx.ui.notify(message, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("dc-apply", {
+    description: "Execute a change's tasks.dml with per-task verification and bounded retries",
+    handler: async (rawArgs, ctx) => {
+      if (activeController || !ctx.isIdle()) {
+        ctx.ui.notify("DeepClause or pi is already active; wait before running /dc-apply", "warning");
+        return;
+      }
+      const change = rawArgs.trim();
+      if (!change) {
+        ctx.ui.notify("Usage: /dc-apply <change>", "warning");
+        return;
+      }
+      try {
+        const plan = await runSpecSkill(ctx, "spec_apply", [change, "plan"]);
+        const commands = [...new Set([...plan.matchAll(/^command:\s*(.+)$/gm)].map((match) => match[1]!.trim()))];
+        const preview = [plan, "", `Approved verification commands: ${commands.join(", ") || "none"}`].join("\n");
+        if (!ctx.hasUI || !await ctx.ui.confirm("Apply change tasks?", preview)) {
+          ctx.ui.notify("Apply cancelled", "warning");
+          return;
+        }
+        const answer = await runSpecSkill(ctx, "spec_apply", [change, "apply"], { verifyCommands: commands, piAgentStep: true });
+        publishResult(pi, answer, { skill: "spec_apply", change });
+        ctx.ui.notify(
+          answer.includes("status: OK") ? `Applied ${change}` : `Apply incomplete for ${change}`,
+          answer.includes("status: OK") ? "info" : "warning",
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        publishResult(pi, `Apply failed: ${message}`, { error: message });
         ctx.ui.notify(message, "error");
       }
     },

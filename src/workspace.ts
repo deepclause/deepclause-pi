@@ -111,6 +111,7 @@ export async function initializeWorkspace(cwd: string): Promise<DeepClausePaths>
     writeIfMissing(path.join(paths.skills, "example.dml"), EXAMPLE_DML),
     writeIfMissing(path.join(paths.skills, "deep_research.dml"), await bundledDeepResearch()),
     writeIfMissing(path.join(paths.lib, "specs.dml"), await bundledAsset("specs.dml")),
+    writeIfMissing(path.join(paths.lib, "apply.dml"), await bundledAsset("apply.dml")),
     writeIfMissing(path.join(paths.skills, "spec_validate.dml"), await bundledAsset("spec_validate.dml")),
     writeIfMissing(path.join(paths.skills, "spec_status.dml"), await bundledAsset("spec_status.dml")),
     writeIfMissing(path.join(paths.skills, "spec_query.dml"), await bundledAsset("spec_query.dml")),
@@ -119,6 +120,7 @@ export async function initializeWorkspace(cwd: string): Promise<DeepClausePaths>
     writeIfMissing(path.join(paths.skills, "spec_archive.dml"), await bundledAsset("spec_archive.dml")),
     writeIfMissing(path.join(paths.skills, "spec_coverage.dml"), await bundledAsset("spec_coverage.dml")),
     writeIfMissing(path.join(paths.skills, "spec_scaffold.dml"), await bundledAsset("spec_scaffold.dml")),
+    writeIfMissing(path.join(paths.skills, "spec_apply.dml"), await bundledAsset("spec_apply.dml")),
   ]);
   return paths;
 }

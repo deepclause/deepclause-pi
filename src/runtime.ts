@@ -16,6 +16,7 @@ import { PI_AGENT_STEP_TOOL } from "./planner.js";
 
 export const PI_WORKSPACE_LIST_TOOL = "pi_workspace_list";
 export const PI_BASH_TOOL = "pi_bash";
+export const DC_VERIFY_RUN_TOOL = "dc_verify_run";
 
 export type BashApproval = (command: string, signal: AbortSignal) => Promise<boolean>;
 
@@ -273,6 +274,7 @@ export async function executeDml(
   controller: AbortController,
   callbacks: ExecutionCallbacks,
   runPiAgentStep?: (request: PiAgentStepRequest, signal: AbortSignal) => Promise<PiAgentStepResult>,
+  verifyCommands: string[] = [],
 ): Promise<ExecutionResult> {
   const model = ctx.model;
   if (!model) throw new Error("Select a pi model before running DeepClause");
@@ -325,9 +327,34 @@ export async function executeDml(
       },
     });
   }
+  if (verifyCommands.length > 0) {
+    sdk.registerTool(DC_VERIFY_RUN_TOOL, {
+      description: "Run one of the change's pre-approved verification commands in the workspace and return its exit code, stdout and stderr.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "Exact approved command string" },
+        },
+        required: ["command"],
+      },
+      execute: async (args) => {
+        const command = typeof args.command === "string" ? args.command.trim() : "";
+        if (!verifyCommands.includes(command)) {
+          throw new Error(`verification command was not approved for this run: ${command}`);
+        }
+        const result = await pi.exec("bash", ["-lc", command], {
+          cwd: ctx.cwd,
+          signal: controller.signal,
+          timeout: 120_000,
+        });
+        return { command, stdout: result.stdout, stderr: result.stderr, exitCode: result.code, killed: result.killed };
+      },
+    });
+  }
+
   sdk.setToolPolicy({
     mode: "whitelist",
-    tools: [PI_WORKSPACE_LIST_TOOL, PI_BASH_TOOL, ...(runPiAgentStep ? [PI_AGENT_STEP_TOOL] : [])],
+    tools: [PI_WORKSPACE_LIST_TOOL, PI_BASH_TOOL, ...(runPiAgentStep ? [PI_AGENT_STEP_TOOL] : []), ...(verifyCommands.length > 0 ? [DC_VERIFY_RUN_TOOL] : [])],
   });
 
   const result: ExecutionResult = {

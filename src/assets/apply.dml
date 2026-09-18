@@ -1,0 +1,166 @@
+%%% apply.dml — deterministic task driver, consulted by spec_apply.dml.
+%%%
+%%% Reads changes/<change>/tasks.dml (plan_task/2 + plan_task_status/2),
+%%% executes the remaining tasks, verifies each task's checks, retries with
+%%% feedback, and rewrites the managed status block.
+%%%
+%%% Execution is delegated per task: executor=pi calls the pi_agent_step bridge;
+%%% executor=dml uses task/N with the current model. Checks are declarative:
+%%% exists(Path), cmd(Command), model(Question).
+
+:- consult('.pi/deepclause/lib/specs.dml').
+
+sp_change_dir(Change, Dir) :- atomic_list_concat([".pi/deepclause/changes/", Change], Dir).
+
+file_exists(Path) :-
+    (   atom_string(PathAtom, Path)
+    ->  true
+    ;   PathAtom = Path
+    ),
+    catch((open(PathAtom, read, Stream), close(Stream)), _, fail).
+
+remaining_tasks(Tasks, Statuses, Remaining) :-
+    findall(plan_task(Id, Props), (
+        member(plan_task(Id, Props), Tasks),
+        \+ sp_status_done(Statuses, Id)
+    ), Remaining).
+
+run_plan(Change, Max, Report) :-
+    sp_change_dir(Change, Dir),
+    atomic_list_concat([Dir, "/tasks.dml"], TasksPath),
+    sp_tasks(Dir, Tasks),
+    sp_task_statuses(Dir, Statuses0),
+    remaining_tasks(Tasks, Statuses0, Remaining),
+    length(Tasks, Total),
+    length(Remaining, RemainingCount),
+    format(string(Start), "apply ~w: ~w tasks, ~w remaining, max ~w attempts", [Change, Total, RemainingCount, Max]),
+    output(Start),
+    run_all(TasksPath, Change, Remaining, Max, Statuses0, Statuses),
+    sp_task_statuses(Dir, FinalStatuses),
+    findall(Id, (member(plan_task(Id, _), Tasks), \+ sp_status_done(FinalStatuses, Id)), Outstanding),
+    length(Outstanding, OutstandingCount),
+    Done is Total - OutstandingCount,
+    sp_count_repairs(FinalStatuses, Repairs),
+    format(string(Header), "apply ~w: ~w/~w tasks verified (~w repairs)", [Change, Done, Total, Repairs]),
+    (   OutstandingCount =:= 0
+    ->  Result = ["status: OK"]
+    ;   findall(Line, (member(Id, Outstanding), format(string(Line), "  outstanding: ~w", [Id])), Lines),
+        Result = ["status: INCOMPLETE"|Lines]
+    ),
+    append([Header], Result, Body),
+    atomics_to_string(Body, "\n", Report).
+
+run_all(_, _, [], _, Statuses, Statuses).
+run_all(TasksPath, Change, [plan_task(Id, Props)|Rest], Max, Statuses0, Statuses) :-
+    run_task(TasksPath, Statuses0, Change, Id, Props, Max, Statuses1),
+    run_all(TasksPath, Change, Rest, Max, Statuses1, Statuses).
+
+run_task(TasksPath, Statuses0, Change, Id, Props, Max, Statuses) :-
+    attempt(TasksPath, Statuses0, Change, Id, Props, 1, Max, none, Statuses).
+
+attempt(TasksPath, Statuses0, Change, Id, Props, N, Max, Feedback, Statuses) :-
+    N =< Max,
+    format(string(Progress), "task ~w attempt ~w/~w", [Id, N, Max]),
+    output(Progress),
+    execute(Change, Id, Props, Feedback, Summary),
+    verify(Props, Summary, Verdict),
+    (   Verdict = ok
+    ->  sp_set_status(Statuses0, Id, done(N), Statuses),
+        sp_write_statuses(TasksPath, Statuses),
+        format(string(Done), "task ~w verified on attempt ~w", [Id, N]),
+        output(Done)
+    ;   Verdict = fail(Evidence),
+        N1 is N + 1,
+        sp_set_status(Statuses0, Id, failed(N1, Evidence), Statuses1),
+        sp_write_statuses(TasksPath, Statuses1),
+        format(string(Msg), "task ~w failed verification: ~w", [Id, Evidence]),
+        output(Msg),
+        attempt(TasksPath, Statuses1, Change, Id, Props, N1, Max, Evidence, Statuses)
+    ).
+attempt(_, Statuses, _, Id, _, N, Max, _, Statuses) :-
+    N > Max,
+    format(string(Msg), "task ~w exhausted ~w attempts", [Id, Max]),
+    output(Msg).
+
+execute(Change, Id, Props, Feedback, Summary) :-
+    catch(get_dict(executor, Props, Executor), _, Executor = dml),
+    catch(get_dict(do, Props, Do), _, Do = ""),
+    catch(get_dict(expected, Props, Expected), _, Expected = ""),
+    build_instruction(Id, Do, Expected, Feedback, Instruction),
+    (   Executor == pi
+    ->  catch(get_dict(tools, Props, Tools), _, Tools = []),
+        exec(pi_agent_step(instruction: Instruction, tools: Tools, expected: Expected, skills: []), Summary)
+    ;   task(Instruction, string(Summary))
+    ).
+
+build_instruction(Id, Do, Expected, none, Instruction) :-
+    format(string(Instruction), "Task ~w. ~w~nExpected result: ~w", [Id, Do, Expected]).
+build_instruction(Id, Do, Expected, Feedback, Instruction) :-
+    Feedback \= none,
+    format(string(Instruction),
+        "Task ~w. ~w~nExpected result: ~w~n~nThe previous attempt failed verification: ~w~nFix only what is needed; do not redo the whole task.",
+        [Id, Do, Expected, Feedback]).
+
+verify(Props, Summary, Verdict) :-
+    catch(get_dict(checks, Props, Checks), _, Checks = []),
+    findall(Message, (member(Check, Checks), run_check(Check, Message), Message \= ok), Failures),
+    (   Summary == ""
+    ->  Verdict = fail("delegated step returned no summary")
+    ;   Failures == []
+    ->  Verdict = ok
+    ;   atomic_list_concat(Failures, "; ", Evidence),
+        Verdict = fail(Evidence)
+    ).
+
+run_check(exists(Path), Result) :-
+    (   file_exists(Path)
+    ->  Result = ok
+    ;   format(string(Result), "missing artifact ~w", [Path])
+    ).
+run_check(cmd(Command), Result) :- run_check(cmd(Command, 1), Result).
+run_check(cmd(Command, _), Result) :-
+    catch(exec(dc_verify_run(command: Command), Dict), Err, Dict = error(Err)),
+    (   Dict = error(Err)
+    ->  format(string(Result), "command error: ~w", [Err])
+    ;   get_dict(exitCode, Dict, Code),
+        (   Code =:= 0
+        ->  Result = ok
+        ;   catch(get_dict(stderr, Dict, ErrText), _, ErrText = ""),
+            normalize_space(string(Short), ErrText),
+            format(string(Result), "command failed: ~w (~w)", [Command, Short])
+        )
+    ).
+run_check(model(Question), Result) :-
+    format(string(Instruction), "Verify by inspection only; do not modify. ~w Reply PASS or FAIL with a short reason.", [Question]),
+    catch(exec(pi_agent_step(instruction: Instruction, tools: ["read"], expected: "PASS or FAIL", skills: []), Verdict), _, Verdict = ""),
+    (   sub_string(Verdict, _, _, _, "PASS")
+    ->  Result = ok
+    ;   format(string(Result), "model check failed: ~w", [Verdict])
+    ).
+
+check_command(cmd(Command), Command) :- !.
+check_command(cmd(Command, _), Command) :- !.
+
+plan_report(Change, Report) :-
+    sp_change_dir(Change, Dir),
+    sp_tasks(Dir, Tasks),
+    length(Tasks, Total),
+    findall(Line, (
+        member(plan_task(Id, Props), Tasks),
+        catch(get_dict(checks, Props, Checks), _, Checks = []),
+        catch(get_dict(do, Props, Do), _, Do = ""),
+        format(string(Line), "  task ~w: ~w  checks: ~w", [Id, Do, Checks])
+    ), Lines),
+    findall(Command, (
+        member(plan_task(_, Props), Tasks),
+        catch(get_dict(checks, Props, Checks), _, Checks = []),
+        member(Check, Checks),
+        check_command(Check, Command)
+    ), Commands0),
+    sort(Commands0, Commands),
+    findall(CommandLine, (member(Command, Commands), format(string(CommandLine), "command: ~w", [Command])), CommandLines),
+    format(string(Header), "apply plan ~w: ~w tasks", [Change, Total]),
+    append([Header], Lines, A),
+    append(A, [""], B),
+    append(B, CommandLines, Body),
+    atomics_to_string(Body, "\n", Report).

@@ -398,7 +398,11 @@ DeepClause keeps behaviour specs separate from executable plans:
 - `.pi/deepclause/specs/**/*.spec.md` — capability specs, the source of truth for behaviour.
 - `.pi/deepclause/changes/<slug>/specs/**/*.md` — change deltas.
 - `.pi/deepclause/lib/specs.dml` — the deterministic parser/validator used by the spec skills.
+- `.pi/deepclause/lib/apply.dml` — the task driver (verify, retry, status write-back).
 - `.pi/deepclause/skills/spec_validate.dml`, `spec_status.dml`, `spec_query.dml`, `spec_graph.dml`.
+
+`tasks.dml` uses `plan_task/2` and `plan_task_status/2` — **not** `task/2`, which collides with
+DML's built-in `task/N` predicate and will not unify after being read.
 
 Specs are plain Markdown and must describe **behaviour only** — no commands, file paths,
 library choices, or implementation plans; those belong in `design.md` or `tasks.dml`.
@@ -425,6 +429,12 @@ Validate and inspect without spending model tokens:
   same coverage and treats uncovered scenarios as errors once a `tasks.dml` exists.
 - `/dc-run spec_scaffold <change>` — print a draft `tasks.dml` with one task per delta
   scenario (read-only; fill in executor, tools, expected and checks).
+- `/dc-run spec_apply <change> plan` — list the tasks and the approved verification commands
+  (read-only).
+- `/dc-apply <change>` — execute the remaining tasks, verify each task's declarative checks
+  (`exists`, `cmd`, `model`), retry with the failure feedback (up to 3 attempts), and rewrite the
+  `plan_task_status/2` block in `tasks.dml`. The `cmd(...)` set is approved once before the run;
+  each command runs through the allowlisted `dc_verify_run` tool.
 - `/dc-archive <change>` — show the preview, confirm, write the merged spec, then move the
   change to `changes/archive/`. The DML step (`spec_archive.dml`) is marked `% Mutating: true`,
   so `/dc-run` refuses it directly; always archive through `/dc-archive` so the merge is reviewed

@@ -1,0 +1,20 @@
+% spec_apply — execute a change's tasks.dml with verification and bounded retries.
+% Mutating: true
+% Usage: /dc-run spec_apply <change>         (or /dc-apply <change>)
+%        /dc-run spec_apply <change> plan    (preview, read-only)
+:- consult('.pi/deepclause/lib/apply.dml').
+
+agent_main(Change, "plan") :-
+    plan_report(Change, Report),
+    answer(Report).
+
+agent_main(Change) :-
+    run_plan(Change, 3, Report),
+    answer(Report).
+
+agent_main(Change, _Mode) :-
+    run_plan(Change, 3, Report),
+    answer(Report).
+
+agent_main :-
+    answer("usage: /dc-run spec_apply <change> [plan]").

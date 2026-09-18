@@ -869,6 +869,14 @@ sp_scaffold_tasks([Id-Name|Rest], N, Lines) :-
     sp_scaffold_tasks(Rest, N1, RestLines),
     Lines = [Block, ""|RestLines].
 
+sp_scaffold_statuses([], _, []).
+sp_scaffold_statuses([_|Rest], N, Lines) :-
+    format(string(TaskId), "1.~w", [N]),
+    format(string(Line), "plan_task_status(\"~w\", pending).", [TaskId]),
+    N1 is N + 1,
+    sp_scaffold_statuses(Rest, N1, RestLines),
+    Lines = [Line|RestLines].
+
 sp_scaffold(Change, Draft) :-
     atomic_list_concat([".pi/deepclause/changes/", Change], ChangeDir),
     sp_change_delta_files(ChangeDir, DeltaFiles),
@@ -881,11 +889,60 @@ sp_scaffold(Change, Draft) :-
         member(Id-Name, Pairs)
     ), Pairs),
     sp_scaffold_tasks(Pairs, 1, TaskLines),
+    sp_scaffold_statuses(Pairs, 1, StatusLines),
     format(string(Header), "% tasks.dml — draft scaffold for change ~w", [Change]),
     append([
         Header,
         "% Fill in executor, tools, expected and checks, then run /dc-check.",
         ""
-    ], TaskLines, All),
+    ], TaskLines, A),
+    append(A, ["", "% --- execution state (managed by apply.dml; do not edit by hand) ---"], B),
+    append(B, StatusLines, All),
     atomics_to_string(All, "\n", Draft0),
     string_concat(Draft0, "\n", Draft).
+
+%% ---------------------------------------------------------------------------
+%% Task status: read and rewrite the managed block in tasks.dml
+%% ---------------------------------------------------------------------------
+
+sp_task_statuses(ChangeDir, Statuses) :-
+    atomic_list_concat([ChangeDir, "/tasks.dml"], Path),
+    sp_read_terms(Path, Terms),
+    findall(plan_task_status(Id, Status), (
+        member(Term, Terms),
+        Term = plan_task_status(Id, Status)
+    ), Statuses).
+
+sp_set_status([], Id, Status, [plan_task_status(Id, Status)]).
+sp_set_status([plan_task_status(Id, _)|Rest], Id, Status, [plan_task_status(Id, Status)|Rest]) :- !.
+sp_set_status([Other|Rest], Id, Status, [Other|Out]) :- sp_set_status(Rest, Id, Status, Out).
+
+sp_status_done(Statuses, Id) :- memberchk(plan_task_status(Id, done(_)), Statuses).
+
+sp_count_repairs(Statuses, Count) :-
+    findall(1, (member(plan_task_status(_, done(N)), Statuses), N > 1), Repairs),
+    length(Repairs, Count).
+
+sp_take_head([], [], no).
+sp_take_head([Line|_], [Line], yes) :- sub_string(Line, _, _, _, "execution state"), !.
+sp_take_head([Line|Rest], [Line|Head], Found) :- sp_take_head(Rest, Head, Found).
+
+sp_split_managed(Text, Head) :-
+    split_string(Text, "\n", "", Lines),
+    sp_take_head(Lines, Head0, Found),
+    (   Found == yes
+    ->  Head = Head0
+    ;   append(Head0, ["", "% --- execution state (managed by apply.dml; do not edit by hand) ---"], Head)
+    ).
+
+sp_write_statuses(TasksPath, Statuses) :-
+    read_file_to_string(TasksPath, Text, []),
+    sp_split_managed(Text, Head),
+    findall(Line, (
+        member(plan_task_status(Id, Status), Statuses),
+        format(string(Line), "plan_task_status(~q, ~q).", [Id, Status])
+    ), StatusLines),
+    append(Head, StatusLines, Body),
+    append(Body, [""], All),
+    atomics_to_string(All, "\n", Out),
+    sp_write_file(TasksPath, Out).

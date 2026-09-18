@@ -24,10 +24,17 @@ and a coverage section in `/dc-check`), and a read-only `spec_scaffold.dml` that
 drafts one task per delta scenario. Note the `plan_task` naming: `task/2` collides
 with DML's built-in `task/N`.
 
-Not yet implemented: `/dc-plan` writing change folders and `tasks.dml`/`apply.dml`,
-the `deltas.dml` / `index.dml` files, concrete verification gates and the
-per-task verify/retry/rollback driver (`lib/apply.dml`, `dc_verify_run`,
-`dc_apply_snapshot`/`dc_apply_restore`), and `RENAMED` support in merge.
+Implemented in phase 4: the task driver (`lib/apply.dml`) with per-task declarative
+checks (`exists`, `cmd`, `model`), bounded retry that threads the failure feedback
+into the repair instruction, and a managed `plan_task_status/2` write-back block in
+`tasks.dml`; the allowlisted `dc_verify_run` tool; the `spec_apply.dml` skill; and
+`/dc-apply <change>`, which previews the tasks and the exact command set, confirms,
+then applies with `pi_agent_step` and `dc_verify_run` enabled.
+
+Not yet implemented: `/dc-plan` writing change folders and `tasks.dml`/`apply.dml`
+(or coverage gates inside `validatePlanSpec`); the `deltas.dml` / `index.dml` files;
+`dc_apply_snapshot` / `dc_apply_restore` and the apply-time rollback path; and
+`RENAMED` support in merge.
 
 It builds directly on [DC_PLAN_PROPOSAL.md](DC_PLAN_PROPOSAL.md), which describes
 the shipped `/dc-plan` + `pi_agent_step` architecture. This document does not
@@ -723,7 +730,7 @@ DML is good at, and the kind of failure a grammar prevents.
 | `/opsx:explore` | just talk to pi (no command, no transaction) | pi turn |
 | `/opsx:new`, `/opsx:propose` | `/dc-plan <request>` | pi turn + `dc_plan_commit` |
 | `/opsx:continue`, `/opsx:update` | `/dc-plan update <change> <what>` | pi turn |
-| `/opsx:apply` | `/dc-run <change>` | `apply.dml` + `pi_agent_step` |
+| `/opsx:apply` | `/dc-apply <change>` | `lib/apply.dml` + `pi_agent_step` + `dc_verify_run` |
 | `/opsx:verify` | `/dc-check <change>` | **pure DML, zero model calls** |
 | `/opsx:archive`, `/opsx:bulk-archive` | `/dc-archive <change>` (preview + confirm + merge + move) | **pure DML merge + one confirm** |
 | `/opsx:sync` | `/dc-run spec_sync <change>` | pure DML |
@@ -831,7 +838,8 @@ meaning.
 │   ├── spec_reindex.dml         # planned
 │   ├── spec_graph.dml
 │   ├── spec_sync.dml            # planned
-│   └── spec_scaffold.dml
+│   ├── spec_scaffold.dml
+│   └── spec_apply.dml
 ├── plans/                       # standalone plans not tied to a change
 ├── diagrams/
 ├── AGENTS.md
