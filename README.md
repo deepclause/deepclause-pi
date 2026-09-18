@@ -131,6 +131,19 @@ The resulting `.dml` file is the plan. Steps use one of two executors:
 
 For each pi step, only the exact tools named in the committed plan are temporarily active. They must still be installed and active when execution begins; existing tool policies, UI, and approvals remain authoritative. DeepClause control tools cannot be requested recursively. The prior active-tool set is restored after success, failure, or cancellation.
 
+## deepclause-pi speckit
+
+Spec-driven changes, built on the same runtime: behaviour specs in plain Markdown, reviewable change deltas, and an executable `tasks.dml` that pi runs with deterministic validation, per-task verification, rollback and resume.
+
+```text
+/dc-plan <request> --change=<slug>   propose
+/dc-check <slug>                     validate (0 tokens)
+/dc-apply <slug>                     execute, verify, retry, resume
+/dc-archive <slug>                   merge into specs/
+```
+
+See the [deepclause-pi speckit guide](docs/SPECKIT.md) for the getting-started walkthrough and reference.
+
 ## Diagrams
 
 Ask pi for a diagram of any DML file in plain language:

@@ -448,6 +448,14 @@ sp_graph_scenarios([scenario(Name, _, _)|Rest], Parent, N0, N, Lines) :-
     sp_graph_scenarios(Rest, Parent, N1, N, RestLines),
     Lines = [NodeLine, EdgeLine|RestLines].
 
+% The runtime passes CLI arguments as strings, while the view clauses below are
+% keyed on atoms. Normalize before dispatch so a string view does not silently
+% fall through to the capabilities catch-all.
+sp_graph(View, Mermaid) :-
+    string(View),
+    atom_string(Atom, View),
+    sp_graph(Atom, Mermaid).
+
 sp_graph(changes, Mermaid) :-
     sp_change_dirs(ChangeDirs),
     sp_graph_change_nodes(ChangeDirs, 0, Lines, _),

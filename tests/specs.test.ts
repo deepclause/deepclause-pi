@@ -142,6 +142,41 @@ describe("deterministic spec engine", () => {
     expect(changes.answer).toContain("flowchart LR");
     expect(changes.answer).toContain("add_dark_mode");
     expect(changes.answer).toContain("-- touches -->");
+
+    // The runtime passes CLI arguments as strings; a string view must dispatch
+    // like the atom rather than falling through to the capabilities catch-all.
+    const stringView = await runLibrary(cwd, `sp_graph("changes", Mermaid), answer(Mermaid)`);
+    expect(stringView.answer).toContain("flowchart LR");
+    expect(stringView.answer).toContain("add_dark_mode");
+    expect(stringView.answer).toContain("-- touches -->");
+    expect(stringView.answer).not.toContain("no specs found");
+  });
+
+  it("dispatches a change graph from a string CLI view through the seeded skill", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "dc-graph-arg-"));
+    const { initializeWorkspace } = await import("../src/workspace.js");
+    const paths = await initializeWorkspace(cwd);
+    await mkdir(path.join(paths.specs, "ui"), { recursive: true });
+    await writeFile(path.join(paths.specs, "ui", "theme.spec.md"), VALID_SPEC, "utf8");
+    await mkdir(path.join(paths.changes, "add_dark_mode", "specs", "ui"), { recursive: true });
+    await writeFile(path.join(paths.changes, "add_dark_mode", "specs", "ui", "theme.spec.md"), VALID_DELTA, "utf8");
+
+    const skill = await readFile(path.join(paths.skills, "spec_graph.dml"), "utf8");
+    const sdk = await createDeepClause({
+      model: "spec-test",
+      llmBackend: { async complete() { return { text: "unused" }; } },
+    });
+    try {
+      const events = [];
+      for await (const event of sdk.runDML(skill, { workspacePath: cwd, args: ["changes"] })) events.push(event);
+      const answer = events.find((event) => event.type === "answer")?.content ?? "";
+      expect(answer).toContain("flowchart LR");
+      expect(answer).toContain("add_dark_mode");
+      expect(answer).toContain("-- touches -->");
+      expect(answer).not.toContain("no specs found");
+    } finally {
+      await sdk.dispose();
+    }
   });
 });
 
