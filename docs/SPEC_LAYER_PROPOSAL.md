@@ -31,10 +31,17 @@ into the repair instruction, and a managed `plan_task_status/2` write-back block
 `/dc-apply <change>`, which previews the tasks and the exact command set, confirms,
 then applies with `pi_agent_step` and `dc_verify_run` enabled.
 
-Not yet implemented: `/dc-plan` writing change folders and `tasks.dml`/`apply.dml`
-(or coverage gates inside `validatePlanSpec`); the `deltas.dml` / `index.dml` files;
-`dc_apply_snapshot` / `dc_apply_restore` and the apply-time rollback path; and
-`RENAMED` support in merge.
+Not yet implemented: `dc_apply_snapshot` / `dc_apply_restore` and the apply-time
+rollback path; the `deltas.dml` / `index.dml` files; and `RENAMED` support in merge.
+
+Implemented in phase 5: change-aware planning. `/dc-plan <request> --change=<slug>`
+writes `changes/<slug>/tasks.dml` (`plan_task/2` with `satisfies` and encoded
+`checks`, plus the managed status block) instead of a standalone plan. Check
+encoding is `cmd:<command>`, `exists:<path>` or `model:<question>`; change plans
+require at least one check per step, and step ids may be OpenSpec-style (`1.1`).
+The planning prompt also instructs pi to create the change's proposal and delta
+specs before committing. Coverage is validated by `/dc-check`, and the flow is
+closed by `/dc-apply` and `/dc-archive`.
 
 It builds directly on [DC_PLAN_PROPOSAL.md](DC_PLAN_PROPOSAL.md), which describes
 the shipped `/dc-plan` + `pi_agent_step` architecture. This document does not

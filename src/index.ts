@@ -29,13 +29,17 @@ import { executeDml } from "./runtime.js";
 import { getPaths, initializeWorkspace, resolveDmlPath } from "./workspace.js";
 import {
   assemblePlanDml,
+  assembleTasksDml,
   buildPlanningPrompt,
   DC_PLAN_COMMIT_TOOL,
   isContextualPlan,
+  normalizePlanSlug,
   PI_AGENT_STEP_TOOL,
   readPlanRequiredTools,
   validateGeneratedPlan,
+  validateGeneratedTasks,
   validatePlanSpec,
+  writeChangeTasks,
   writePlanNonDestructively,
   type PlanningSnapshot,
 } from "./planner.js";
@@ -58,12 +62,14 @@ export interface ParsedRun {
 interface ParsedPlan {
   request: string;
   name?: string;
+  change?: string;
   debug: boolean;
 }
 
 interface PlanningTransaction {
   snapshot: PlanningSnapshot;
   nameOverride?: string;
+  change?: string;
   committed: boolean;
   startedAt: number;
 }
@@ -148,6 +154,7 @@ export function parseRun(input: string): ParsedRun {
 export function parsePlan(input: string): ParsedPlan {
   const tokens = splitArguments(input);
   let name: string | undefined;
+  let change: string | undefined;
   let debug = false;
   const requestParts: string[] = [];
   for (let index = 0; index < tokens.length; index++) {
@@ -155,12 +162,15 @@ export function parsePlan(input: string): ParsedPlan {
     if (token === "--debug" || token === "-d") debug = true;
     else if (token.startsWith("--name=")) name = token.slice("--name=".length);
     else if (token === "--name") name = tokens[++index];
+    else if (token.startsWith("--change=")) change = token.slice("--change=".length);
+    else if (token === "--change") change = tokens[++index];
     else requestParts.push(token);
   }
   const request = requestParts.join(" ").trim();
-  if (!request) throw new Error("Usage: /dc-plan <request> [--name=slug] [--debug]");
+  if (!request) throw new Error("Usage: /dc-plan <request> [--name=slug] [--change=slug] [--debug]");
   if (name !== undefined && !name.trim()) throw new Error("--name requires a non-empty slug");
-  return { request, name: name?.trim(), debug };
+  if (change !== undefined && !change.trim()) throw new Error("--change requires a non-empty slug");
+  return { request, name: name?.trim(), change: change?.trim(), debug };
 }
 
 function messageText(message: unknown): string {
@@ -272,6 +282,8 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             requiredTools: Type.Array(Type.String()),
             relevantSkills: Type.Array(Type.String()),
             expectedResult: Type.String(),
+            satisfies: Type.Optional(Type.Array(Type.String())),
+            checks: Type.Optional(Type.Array(Type.String())),
           }), { minItems: 1, maxItems: 12 }),
           finalSynthesis: Type.Optional(Type.String()),
           failureMessage: Type.String(),
@@ -292,14 +304,18 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
           }
 
           try {
-            const plan = validatePlanSpec(params, transaction.snapshot, transaction.nameOverride);
+            const plan = validatePlanSpec(params, transaction.snapshot, transaction.nameOverride, {
+              requireChecks: Boolean(transaction.change),
+              change: transaction.change,
+            });
             const preview = [
               plan.spec.title,
               `Objective: ${plan.spec.objective}`,
+              transaction.change ? `Change: ${transaction.change}` : "",
               `Steps: ${plan.spec.steps.length}`,
               `Pi tools: ${plan.requiredTools.join(", ") || "none"}`,
-              ...plan.spec.steps.map((step, index) => `${index + 1}. [${step.executor}] ${step.title}`),
-            ].join("\n");
+              ...plan.spec.steps.map((step, index) => `${index + 1}. [${step.executor}] ${step.title}${step.checks.length ? ` (${step.checks.length} checks)` : ""}`),
+            ].filter(Boolean).join("\n");
             if (!ctx.hasUI || !await ctx.ui.confirm("Create executable DeepClause plan?", preview)) {
               return {
                 content: [{ type: "text", text: "Plan creation was not approved." }],
@@ -308,15 +324,24 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             }
 
             const paths = await initializeWorkspace(ctx.cwd);
-            const dml = assemblePlanDml(plan, transaction.snapshot);
-            await validateGeneratedPlan(dml);
-            const filePath = await writePlanNonDestructively(paths, plan.spec.slug, dml);
+            const content = transaction.change
+              ? assembleTasksDml(plan, transaction.snapshot)
+              : assemblePlanDml(plan, transaction.snapshot);
+            if (transaction.change) await validateGeneratedTasks(content);
+            else await validateGeneratedPlan(content);
+            const filePath = transaction.change
+              ? await writeChangeTasks(paths, normalizePlanSlug(transaction.change), content)
+              : await writePlanNonDestructively(paths, plan.spec.slug, content);
             transaction.committed = true;
             setPlanCommitActive(false);
             const relativePath = path.relative(paths.root, filePath).split(path.sep).join("/");
             const text = [
-              `Created executable DML plan: .pi/deepclause/${relativePath}`,
-              `Run it with: /dc-run ${relativePath}`,
+              transaction.change
+                ? `Created change plan: .pi/deepclause/${relativePath}`
+                : `Created executable DML plan: .pi/deepclause/${relativePath}`,
+              transaction.change
+                ? `Next: /dc-check ${normalizePlanSlug(transaction.change)}`
+                : `Run it with: /dc-run ${relativePath}`,
               plan.warnings.length ? `Warnings:\n${plan.warnings.join("\n")}` : "",
             ].filter(Boolean).join("\n\n");
             return {
@@ -324,6 +349,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
               details: {
                 success: true,
                 path: relativePath,
+                change: transaction.change,
                 contextual: plan.spec.steps.some((step) => step.executor === "pi"),
                 requiredTools: plan.requiredTools,
                 warnings: plan.warnings,
@@ -852,7 +878,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         "it writes the viewer under .pi/deepclause/diagrams/ and opens it.",
         "Commands:",
         "  /dc-list",
-        "  /dc-plan <request> [--name=slug]   create an executable contextual DML plan",
+        "  /dc-plan <request> [--name=slug] [--change=slug]   create a plan or a change plan",
         "  /dc-check <change|spec>            validate specs and deltas deterministically",
         "  /dc-archive <change>              merge a change delta into specs/ and archive it",
         "  /dc-apply <change>                execute a change's tasks.dml with verification",
@@ -891,12 +917,18 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         planningTransaction = {
           snapshot,
           nameOverride: parsed.name,
+          change: parsed.change,
           committed: false,
           startedAt: Date.now(),
         };
         setPlanCommitActive(true);
-        ctx.ui.notify("Starting a contextual pi planning turn. Review the generated plan before it is written.", "info");
-        pi.sendUserMessage(buildPlanningPrompt(parsed.request, snapshot, parsed.name));
+        ctx.ui.notify(
+          parsed.change
+            ? `Starting a change planning turn for '${parsed.change}'. Review the delta and plan before it is written.`
+            : "Starting a contextual pi planning turn. Review the generated plan before it is written.",
+          "info",
+        );
+        pi.sendUserMessage(buildPlanningPrompt(parsed.request, snapshot, parsed.name, parsed.change));
       } catch (error) {
         planningTransaction = undefined;
         setPlanCommitActive(false);

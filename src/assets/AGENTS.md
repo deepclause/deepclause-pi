@@ -52,6 +52,10 @@ Generated steps use `executor=dml` for contained model reasoning and `executor=p
 
 Contextual plans require explicit user execution with `/dc-run plans/<name>.dml` and confirmation. They cannot run through model-callable `dc_run`, because that would nest a pi agent turn inside the calling agent turn.
 
+### Change plans
+
+`/dc-plan <request> --change=<slug>` targets a change instead of `plans/`. The same planning turn first creates `changes/<slug>/` with normal file tools (proposal.md, one delta spec per capability under `specs/`, optional design.md), then commits `changes/<slug>/tasks.dml`: `plan_task/2` facts with `satisfies` (scenario ids) and declarative `checks`, plus the managed `plan_task_status/2` block. Every step must declare at least one check. Review it with `/dc-check <slug>` and execute it with `/dc-apply <slug>`.
+
 ## Program structure and arguments
 
 Pi passes zero to three positional **strings** to `agent_main`:

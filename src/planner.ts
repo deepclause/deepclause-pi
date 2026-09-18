@@ -16,6 +16,8 @@ export interface PlanStepSpec {
   requiredTools: string[];
   relevantSkills: string[];
   expectedResult: string;
+  satisfies: string[];
+  checks: string[];
 }
 
 export interface PlanSpec {
@@ -26,6 +28,12 @@ export interface PlanSpec {
   steps: PlanStepSpec[];
   finalSynthesis?: string;
   failureMessage: string;
+  change?: string;
+}
+
+export interface ValidatePlanOptions {
+  requireChecks?: boolean;
+  change?: string;
 }
 
 export interface PlanningSnapshot {
@@ -70,7 +78,12 @@ export function normalizePlanSlug(value: string): string {
   return slug;
 }
 
-export function validatePlanSpec(value: unknown, snapshot: PlanningSnapshot, nameOverride?: string): ValidatedPlan {
+export function validatePlanSpec(
+  value: unknown,
+  snapshot: PlanningSnapshot,
+  nameOverride?: string,
+  options: ValidatePlanOptions = {},
+): ValidatedPlan {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Plan specification must be an object");
   const raw = value as Record<string, unknown>;
   if (!Array.isArray(raw.steps) || raw.steps.length < 1 || raw.steps.length > 12) {
@@ -86,13 +99,19 @@ export function validatePlanSpec(value: unknown, snapshot: PlanningSnapshot, nam
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`steps[${index}] must be an object`);
     const step = entry as Record<string, unknown>;
     const id = requireText(step.id ?? `step_${index + 1}`, `steps[${index}].id`, 80);
-    if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(id)) throw new Error(`steps[${index}].id must be a simple identifier`);
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(id)) throw new Error(`steps[${index}].id must be a simple identifier (letters, digits, dot, dash, underscore)`);
     if (ids.has(id)) throw new Error(`Duplicate plan step id: ${id}`);
     ids.add(id);
     const executor = step.executor;
     if (executor !== "pi" && executor !== "dml") throw new Error(`steps[${index}].executor must be pi or dml`);
     const requiredTools = stringArray(step.requiredTools, `steps[${index}].requiredTools`, 16);
     const relevantSkills = stringArray(step.relevantSkills, `steps[${index}].relevantSkills`, 16);
+    const satisfies = stringArray(step.satisfies, `steps[${index}].satisfies`, 32);
+    const checks = stringArray(step.checks, `steps[${index}].checks`, 16);
+    for (const check of checks) parseCheck(check);
+    if (options.requireChecks && checks.length === 0) {
+      throw new Error(`Plan step ${id} must declare at least one verification check (cmd:..., exists:... or model:...)`);
+    }
 
     if (executor === "dml" && requiredTools.length > 0) {
       throw new Error(`DML step ${id} cannot request pi tools; use executor=pi`);
@@ -114,6 +133,8 @@ export function validatePlanSpec(value: unknown, snapshot: PlanningSnapshot, nam
       requiredTools: [...new Set(requiredTools)],
       relevantSkills: [...new Set(relevantSkills)],
       expectedResult: requireText(step.expectedResult, `steps[${index}].expectedResult`, 1_000),
+      satisfies: [...new Set(satisfies)],
+      checks: [...new Set(checks)],
     };
   });
 
@@ -127,6 +148,7 @@ export function validatePlanSpec(value: unknown, snapshot: PlanningSnapshot, nam
       ? requireText(raw.finalSynthesis, "finalSynthesis", 2_000)
       : undefined,
     failureMessage: requireText(raw.failureMessage, "failureMessage", 1_000),
+    change: options.change ? normalizePlanSlug(options.change) : undefined,
   };
 
   return {
@@ -146,6 +168,71 @@ function dmlStringList(values: string[]): string {
 
 function commentText(value: string): string {
   return value.replace(/[\r\n]+/g, " ").replace(/%/g, "percent").trim();
+}
+
+export interface ParsedCheck {
+  kind: "cmd" | "exists" | "model";
+  value: string;
+}
+
+/** Parse an encoded verification check: cmd:<command>, exists:<path>, model:<question>. */
+export function parseCheck(encoded: string): ParsedCheck {
+  const separator = encoded.indexOf(":");
+  if (separator <= 0) throw new Error(`Check must be cmd:..., exists:... or model:...; got '${encoded}'`);
+  const kind = encoded.slice(0, separator).trim();
+  const value = encoded.slice(separator + 1).trim();
+  if (kind !== "cmd" && kind !== "exists" && kind !== "model") throw new Error(`Unknown check kind '${kind}' in '${encoded}'`);
+  if (!value) throw new Error(`Check '${encoded}' has an empty value`);
+  return { kind, value };
+}
+
+/**
+ * Assemble the `tasks.dml` data artifact for a change: plan_task/2 definitions plus
+ * the managed plan_task_status/2 block. Verified by /dc-check and executed by /dc-apply.
+ */
+export function assembleTasksDml(plan: ValidatedPlan, snapshot: PlanningSnapshot): string {
+  const { spec } = plan;
+  const taskBlocks = spec.steps.map((step) => {
+    const checks = step.checks.map((encoded) => {
+      const { kind, value } = parseCheck(encoded);
+      return `${kind}(${dmlString(value)})`;
+    });
+    return [
+      `plan_task(${dmlString(step.id)}, task{`,
+      `    executor:  ${step.executor},`,
+      `    do:        ${dmlString(step.instruction)},`,
+      `    tools:     ${dmlStringList(step.requiredTools)},`,
+      `    expected:  ${dmlString(step.expectedResult)},`,
+      `    satisfies: ${dmlStringList(step.satisfies)},`,
+      `    checks:    [${checks.join(", ")}]`,
+      `}).`,
+    ].join("\n");
+  });
+  const statusLines = spec.steps.map((step) => `plan_task_status(${dmlString(step.id)}, pending).`);
+  const metadata = [
+    "% tasks.dml — generated by /dc-plan. Edit conservatively.",
+    `% Change: ${commentText(spec.change ?? spec.slug)}`,
+    `% Title: ${commentText(spec.title)}`,
+    `% Planning model: ${commentText(snapshot.model)}`,
+    `% Required pi tools: ${plan.requiredTools.join(", ") || "none"}`,
+  ].join("\n");
+  return `${metadata}\n\n${taskBlocks.join("\n\n")}\n\n% --- execution state (managed by apply.dml; do not edit by hand) ---\n${statusLines.join("\n")}\n`;
+}
+
+/** Write changes/<slug>/tasks.dml, refusing to clobber an existing plan. */
+export async function writeChangeTasks(paths: DeepClausePaths, slug: string, text: string): Promise<string> {
+  const dir = path.join(paths.changes, slug);
+  await mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, "tasks.dml");
+  try {
+    await writeFile(filePath, text, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`changes/${slug}/tasks.dml already exists; update it with /dc-plan update instead`);
+    }
+    throw error;
+  }
+  return filePath;
 }
 
 export function assemblePlanDml(plan: ValidatedPlan, snapshot: PlanningSnapshot): string {
@@ -209,6 +296,16 @@ export async function validateGeneratedPlan(dml: string): Promise<void> {
   if (!validation.valid) throw new Error(`Generated DML failed validation: ${validation.errors.join("; ")}`);
 }
 
+/**
+ * Data-only artifact (tasks.dml): no agent_main of its own, so validation appends a
+ * trivial entry point to parse the facts without changing what is written.
+ */
+export async function validateGeneratedTasks(dml: string): Promise<void> {
+  if (dml.includes(".deepclause/")) throw new Error("Generated tasks may not reference .deepclause/");
+  const validation = await validateWithProlog(`${dml}\nagent_main :- true.\n`);
+  if (!validation.valid) throw new Error(`Generated tasks.dml failed validation: ${validation.errors.join("; ")}`);
+}
+
 export async function writePlanNonDestructively(paths: DeepClausePaths, slug: string, dml: string): Promise<string> {
   await mkdir(paths.plans, { recursive: true });
   for (let suffix = 1; suffix <= 100; suffix++) {
@@ -235,7 +332,7 @@ export async function readPlanRequiredTools(filePath: string): Promise<string[]>
   return [...new Set(match[1]!.split(",").map((name) => name.trim()).filter(Boolean))];
 }
 
-export function buildPlanningPrompt(request: string, snapshot: PlanningSnapshot, nameOverride?: string): string {
+export function buildPlanningPrompt(request: string, snapshot: PlanningSnapshot, nameOverride?: string, change?: string): string {
   const tools = snapshot.allTools.map((tool) => ({
     name: tool.name,
     active: snapshot.activeTools.includes(tool.name),
@@ -244,6 +341,17 @@ export function buildPlanningPrompt(request: string, snapshot: PlanningSnapshot,
     guidelines: tool.promptGuidelines ?? [],
     source: tool.sourceInfo,
   }));
+  const changeInstructions = change
+    ? [
+        `This plan is for the change '${change}'. Before committing, create .pi/deepclause/changes/${change}/ with normal file tools:`,
+        "- proposal.md — why / what / capabilities / impact.",
+        "- specs/<capability>.spec.md — delta(s) using ## ADDED|MODIFIED|REMOVED Requirements.",
+        "- design.md — optional approach and trade-offs.",
+        "Specs describe behaviour only: no commands, file paths, library choices or implementation steps.",
+        "Use exactly three hashes for ### Requirement and four for #### Scenario; every requirement needs at least one scenario.",
+        "Each committed step must list the scenario ids it satisfies (capability#scenario-slug) and at least one check encoded as cmd:<command>, exists:<path> or model:<question>.",
+      ]
+    : [];
   return [
     "Create an executable DeepClause plan for the request below.",
     "You are in a normal pi turn: inspect the workspace and use currently active tools when that materially improves the plan.",
@@ -253,6 +361,7 @@ export function buildPlanningPrompt(request: string, snapshot: PlanningSnapshot,
     "Choose executor='dml' for contained reasoning that needs no pi tool; requiredTools must then be empty.",
     "Use only exact active tool names. Never request dc_run, dc_plan_commit, or pi_agent_step.",
     "Keep steps bounded, concrete, ordered, and independently observable. Prefer 3-8 steps.",
+    ...changeInstructions,
     nameOverride ? `The user requested the plan filename slug: ${nameOverride}` : "Choose a concise lowercase slug.",
     `User request:\n${request}`,
     `Current model: ${snapshot.model}; thinking level: ${snapshot.thinkingLevel}`,
