@@ -25,7 +25,7 @@ import {
   resolveDiagramSource,
 } from "./diagram/workspace.js";
 import { completeTextWithPiModel } from "./model.js";
-import { executeDml } from "./runtime.js";
+import { executeDml, gitRestore } from "./runtime.js";
 import { getPaths, initializeWorkspace, resolveDmlPath } from "./workspace.js";
 import {
   assemblePlanDml,
@@ -756,7 +756,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     skill: string,
     args: string[] = [],
-    options: { verifyCommands?: string[]; piAgentStep?: boolean } = {},
+    options: { verifyCommands?: string[]; piAgentStep?: boolean; changeJsonPath?: string } = {},
   ): Promise<string> => {
     const paths = await initializeWorkspace(ctx.cwd);
     const config = await loadConfig(paths.config);
@@ -779,6 +779,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         },
         options.piAgentStep ? (request, signal) => runPiAgentStep(request, signal, ctx) : undefined,
         options.verifyCommands ?? [],
+        options.changeJsonPath,
       );
       if (result.errors.length) throw new Error(result.errors.join("\n"));
       return result.answer ?? "(no answer)";
@@ -1067,19 +1068,30 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         return;
       }
       try {
-        const plan = await runSpecSkill(ctx, "spec_apply", [change, "plan"]);
-        const commands = [...new Set([...plan.matchAll(/^command:\s*(.+)$/gm)].map((match) => match[1]!.trim()))];
-        const preview = [plan, "", `Approved verification commands: ${commands.join(", ") || "none"}`].join("\n");
-        if (!ctx.hasUI || !await ctx.ui.confirm("Apply change tasks?", preview)) {
-          ctx.ui.notify("Apply cancelled", "warning");
-          return;
+        const paths = await initializeWorkspace(ctx.cwd);
+        const changeJson = path.join(paths.changes, change, "change.json");
+        let succeeded = false;
+        try {
+          const plan = await runSpecSkill(ctx, "spec_apply", [change, "plan"]);
+          const commands = [...new Set([...plan.matchAll(/^command:\s*(.+)$/gm)].map((match) => match[1]!.trim()))];
+          const preview = [plan, "", `Approved verification commands: ${commands.join(", ") || "none"}`].join("\n");
+          if (!ctx.hasUI || !await ctx.ui.confirm("Apply change tasks?", preview)) {
+            ctx.ui.notify("Apply cancelled", "warning");
+            return;
+          }
+          const answer = await runSpecSkill(ctx, "spec_apply", [change, "apply"], { verifyCommands: commands, piAgentStep: true, changeJsonPath: changeJson });
+          succeeded = answer.includes("status: OK");
+          publishResult(pi, answer, { skill: "spec_apply", change });
+          ctx.ui.notify(
+            succeeded ? `Applied ${change}` : `Apply incomplete for ${change}`,
+            succeeded ? "info" : "warning",
+          );
+        } finally {
+          if (!succeeded) {
+            const restored = await gitRestore(pi, ctx.cwd, changeJson).catch(() => null);
+            if (restored) ctx.ui.notify(`Restored the working tree to ${restored}`, "warning");
+          }
         }
-        const answer = await runSpecSkill(ctx, "spec_apply", [change, "apply"], { verifyCommands: commands, piAgentStep: true });
-        publishResult(pi, answer, { skill: "spec_apply", change });
-        ctx.ui.notify(
-          answer.includes("status: OK") ? `Applied ${change}` : `Apply incomplete for ${change}`,
-          answer.includes("status: OK") ? "info" : "warning",
-        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         publishResult(pi, `Apply failed: ${message}`, { error: message });

@@ -131,3 +131,51 @@ describe("apply driver", () => {
     }
   });
 });
+
+describe("apply rollback wiring", () => {
+  it("snapshots before applying and accepts on success", async () => {
+    const cwd = await workspace();
+    const skill = await readFile(SKILL_SOURCE, "utf8");
+    let snapshots = 0;
+    let accepts = 0;
+    const sdk = await createDeepClause({
+      model: "apply-test",
+      llmBackend: { async complete() { return { text: "unused" }; } },
+    });
+    try {
+      sdk.registerTool("pi_agent_step", {
+        description: "stub",
+        parameters: { type: "object", properties: { instruction: { type: "string" } }, required: ["instruction"] },
+        execute: async () => "implemented the task",
+      });
+      sdk.registerTool("dc_verify_run", {
+        description: "stub",
+        parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+        execute: async (args) => ({ command: String(args.command), stdout: "", stderr: "", exitCode: 0, killed: false }),
+      });
+      sdk.registerTool("dc_apply_snapshot", {
+        description: "stub snapshot",
+        parameters: { type: "object", properties: {}, required: [] },
+        execute: async () => { snapshots += 1; return "abc1234"; },
+      });
+      sdk.registerTool("dc_apply_accept", {
+        description: "stub accept",
+        parameters: { type: "object", properties: {}, required: [] },
+        execute: async () => { accepts += 1; return "accepted"; },
+      });
+      sdk.setToolPolicy({ mode: "whitelist", tools: ["pi_agent_step", "dc_verify_run", "dc_apply_snapshot", "dc_apply_accept"] });
+
+      const events = [];
+      for await (const event of sdk.runDML(skill, { workspacePath: cwd, args: ["c", "apply"] })) events.push(event);
+      const answer = events.find((event) => event.type === "answer")?.content ?? "";
+      const errors = events.filter((event) => event.type === "error").map((event) => event.content);
+      expect(errors).toEqual([]);
+      expect(answer).toContain("status: OK");
+      expect(answer).toContain("rollback: snapshot abc1234");
+      expect(snapshots).toBe(1);
+      expect(accepts).toBe(1);
+    } finally {
+      await sdk.dispose();
+    }
+  });
+});

@@ -31,8 +31,16 @@ into the repair instruction, and a managed `plan_task_status/2` write-back block
 `/dc-apply <change>`, which previews the tasks and the exact command set, confirms,
 then applies with `pi_agent_step` and `dc_verify_run` enabled.
 
-Not yet implemented: `dc_apply_snapshot` / `dc_apply_restore` and the apply-time
-rollback path; the `deltas.dml` / `index.dml` files; and `RENAMED` support in merge.
+Not yet implemented: the `deltas.dml` / `index.dml` files, and `RENAMED` support in merge.
+
+Implemented in phase 6: apply-time rollback. `dc_apply_snapshot` records a git ref
+(refusing a dirty tree) in `change.json`; `dc_apply_accept` clears it on success; the
+`/dc-apply` harness restores on any run that does not report `status: OK`, including
+cancellation, using `git reset --hard` plus `git clean -fd`. When no snapshot is
+available (not a git repo, or a dirty tree) the apply proceeds and the report says
+rollback is unavailable. Two runtime quirks surfaced: `exists_file/1` is unreliable
+in the WASM filesystem (use `open/2`), and a DML predicate named `snapshot/1`
+collides with a runtime accessor, so the driver uses `take_snapshot/1`.
 
 Implemented in phase 5: change-aware planning. `/dc-plan <request> --change=<slug>`
 writes `changes/<slug>/tasks.dml` (`plan_task/2` with `satisfies` and encoded

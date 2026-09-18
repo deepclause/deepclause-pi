@@ -1,4 +1,4 @@
-import { realpath, readFile } from "node:fs/promises";
+import { realpath, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createDeepClause } from "deepclause-sdk";
 import type {
@@ -17,6 +17,56 @@ import { PI_AGENT_STEP_TOOL } from "./planner.js";
 export const PI_WORKSPACE_LIST_TOOL = "pi_workspace_list";
 export const PI_BASH_TOOL = "pi_bash";
 export const DC_VERIFY_RUN_TOOL = "dc_verify_run";
+export const DC_APPLY_SNAPSHOT_TOOL = "dc_apply_snapshot";
+export const DC_APPLY_ACCEPT_TOOL = "dc_apply_accept";
+export const DC_APPLY_RESTORE_TOOL = "dc_apply_restore";
+
+async function readSnapshot(changeJsonPath: string): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await readFile(changeJsonPath, "utf8")) as Record<string, unknown>;
+    return typeof parsed.snapshot === "string" && parsed.snapshot ? parsed.snapshot : null;
+  } catch {
+    return null;
+  }
+}
+
+async function patchChangeJson(changeJsonPath: string, patch: Record<string, unknown>): Promise<void> {
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(changeJsonPath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+  } catch {
+    // start a fresh manifest
+  }
+  await writeFile(changeJsonPath, `${JSON.stringify({ ...existing, ...patch }, null, 2)}\n`, "utf8");
+}
+
+/** Record a git snapshot ref, refusing a dirty working tree. */
+export async function gitSnapshot(pi: Pick<ExtensionAPI, "exec">, cwd: string, changeJsonPath: string): Promise<string> {
+  const status = await pi.exec("git", ["status", "--porcelain"], { cwd });
+  if (status.code !== 0) throw new Error("git is unavailable or this is not a repository");
+  if (status.stdout.trim()) throw new Error("working tree is dirty; commit or stash before applying");
+  const head = await pi.exec("git", ["rev-parse", "HEAD"], { cwd });
+  if (head.code !== 0) throw new Error("could not read git HEAD");
+  const ref = head.stdout.trim();
+  await patchChangeJson(changeJsonPath, { snapshot: ref });
+  return ref;
+}
+
+/** Restore the recorded snapshot (hard reset plus clean of untracked files). */
+export async function gitRestore(pi: Pick<ExtensionAPI, "exec">, cwd: string, changeJsonPath: string): Promise<string | null> {
+  const ref = await readSnapshot(changeJsonPath);
+  if (!ref) return null;
+  await pi.exec("git", ["reset", "--hard", ref], { cwd });
+  await pi.exec("git", ["clean", "-fd"], { cwd });
+  await patchChangeJson(changeJsonPath, { snapshot: null });
+  return ref;
+}
+
+/** Mark the apply accepted so the safety net does not restore it. */
+export async function gitAccept(changeJsonPath: string): Promise<void> {
+  await patchChangeJson(changeJsonPath, { snapshot: null });
+}
 
 export type BashApproval = (command: string, signal: AbortSignal) => Promise<boolean>;
 
@@ -275,6 +325,7 @@ export async function executeDml(
   callbacks: ExecutionCallbacks,
   runPiAgentStep?: (request: PiAgentStepRequest, signal: AbortSignal) => Promise<PiAgentStepResult>,
   verifyCommands: string[] = [],
+  applyChangeJsonPath?: string,
 ): Promise<ExecutionResult> {
   const model = ctx.model;
   if (!model) throw new Error("Select a pi model before running DeepClause");
@@ -352,9 +403,37 @@ export async function executeDml(
     });
   }
 
+  if (applyChangeJsonPath) {
+    const changeJsonPath = applyChangeJsonPath;
+    sdk.registerTool(DC_APPLY_SNAPSHOT_TOOL, {
+      description: "Record a git snapshot of the workspace before applying tasks. Refuses a dirty working tree.",
+      parameters: { type: "object", properties: {}, required: [] },
+      execute: async () => gitSnapshot(pi, ctx.cwd, changeJsonPath),
+    });
+    sdk.registerTool(DC_APPLY_ACCEPT_TOOL, {
+      description: "Accept the apply so the working tree is not restored.",
+      parameters: { type: "object", properties: {}, required: [] },
+      execute: async () => {
+        await gitAccept(changeJsonPath);
+        return "accepted";
+      },
+    });
+    sdk.registerTool(DC_APPLY_RESTORE_TOOL, {
+      description: "Restore the recorded snapshot, discarding task changes.",
+      parameters: { type: "object", properties: {}, required: [] },
+      execute: async () => (await gitRestore(pi, ctx.cwd, changeJsonPath)) ?? "none",
+    });
+  }
+
   sdk.setToolPolicy({
     mode: "whitelist",
-    tools: [PI_WORKSPACE_LIST_TOOL, PI_BASH_TOOL, ...(runPiAgentStep ? [PI_AGENT_STEP_TOOL] : []), ...(verifyCommands.length > 0 ? [DC_VERIFY_RUN_TOOL] : [])],
+    tools: [
+      PI_WORKSPACE_LIST_TOOL,
+      PI_BASH_TOOL,
+      ...(runPiAgentStep ? [PI_AGENT_STEP_TOOL] : []),
+      ...(verifyCommands.length > 0 ? [DC_VERIFY_RUN_TOOL] : []),
+      ...(applyChangeJsonPath ? [DC_APPLY_SNAPSHOT_TOOL, DC_APPLY_ACCEPT_TOOL, DC_APPLY_RESTORE_TOOL] : []),
+    ],
   });
 
   const result: ExecutionResult = {

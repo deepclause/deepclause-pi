@@ -438,7 +438,10 @@ Validate and inspect without spending model tokens:
 - `/dc-apply <change>` — execute the remaining tasks, verify each task's declarative checks
   (`exists`, `cmd`, `model`), retry with the failure feedback (up to 3 attempts), and rewrite the
   `plan_task_status/2` block in `tasks.dml`. The `cmd(...)` set is approved once before the run;
-  each command runs through the allowlisted `dc_verify_run` tool.
+  each command runs through the allowlisted `dc_verify_run` tool. A git snapshot is recorded first
+  (in `change.json`); if the run does not end with `status: OK` — including cancellation — the
+  working tree is restored. A dirty tree refuses the snapshot, so the apply then proceeds without
+  rollback.
 - `/dc-archive <change>` — show the preview, confirm, write the merged spec, then move the
   change to `changes/archive/`. The DML step (`spec_archive.dml`) is marked `% Mutating: true`,
   so `/dc-run` refuses it directly; always archive through `/dc-archive` so the merge is reviewed

@@ -25,10 +25,29 @@ remaining_tasks(Tasks, Statuses, Remaining) :-
         \+ sp_status_done(Statuses, Id)
     ), Remaining).
 
+%% Snapshot/accept are optional: without the tools (or outside git) the apply just
+%% proceeds without rollback, and the report says so.
+take_snapshot(Snap) :-
+    (   catch(exec(dc_apply_snapshot, S), Err, S = error(Err)),
+        nonvar(S)
+    ->  Snap = S
+    ;   Snap = none
+    ).
+
+accept_apply(none) :- !.
+accept_apply(error(_)) :- !.
+accept_apply(_) :- catch(exec(dc_apply_accept, _), _, true).
+
+rollback_line(none, "rollback: unavailable (snapshot tool inactive or not a git repo)").
+rollback_line(error(Err), Line) :- !, format(string(Line), "rollback: unavailable (~w)", [Err]).
+rollback_line(Ref, Line) :-
+    format(string(Line), "rollback: snapshot ~w recorded (restored by /dc-apply on a non-OK run)", [Ref]).
+
 run_plan(Change, Max, Report) :-
     sp_change_dir(Change, Dir),
     atomic_list_concat([Dir, "/tasks.dml"], TasksPath),
     sp_tasks(Dir, Tasks),
+    take_snapshot(Snap),
     sp_task_statuses(Dir, Statuses0),
     remaining_tasks(Tasks, Statuses0, Remaining),
     length(Tasks, Total),
@@ -43,11 +62,14 @@ run_plan(Change, Max, Report) :-
     sp_count_repairs(FinalStatuses, Repairs),
     format(string(Header), "apply ~w: ~w/~w tasks verified (~w repairs)", [Change, Done, Total, Repairs]),
     (   OutstandingCount =:= 0
-    ->  Result = ["status: OK"]
+    ->  accept_apply(Snap),
+        Result = ["status: OK"]
     ;   findall(Line, (member(Id, Outstanding), format(string(Line), "  outstanding: ~w", [Id])), Lines),
         Result = ["status: INCOMPLETE"|Lines]
     ),
-    append([Header], Result, Body),
+    rollback_line(Snap, RollbackLine),
+    append([Header], Result, Body0),
+    append(Body0, [RollbackLine], Body),
     atomics_to_string(Body, "\n", Report).
 
 run_all(_, _, [], _, Statuses, Statuses).
