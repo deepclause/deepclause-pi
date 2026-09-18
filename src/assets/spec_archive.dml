@@ -1,0 +1,11 @@
+% spec_archive — merge a change delta into specs/ and move the change to archive/.
+% Mutating: true
+% Usage: /dc-run spec_archive <change>
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main(Change) :-
+    sp_archive(Change, apply, Report),
+    answer(Report).
+
+agent_main :-
+    answer("usage: /dc-run spec_archive <change>").

@@ -115,6 +115,8 @@ export async function initializeWorkspace(cwd: string): Promise<DeepClausePaths>
     writeIfMissing(path.join(paths.skills, "spec_status.dml"), await bundledAsset("spec_status.dml")),
     writeIfMissing(path.join(paths.skills, "spec_query.dml"), await bundledAsset("spec_query.dml")),
     writeIfMissing(path.join(paths.skills, "spec_graph.dml"), await bundledAsset("spec_graph.dml")),
+    writeIfMissing(path.join(paths.skills, "spec_merge.dml"), await bundledAsset("spec_merge.dml")),
+    writeIfMissing(path.join(paths.skills, "spec_archive.dml"), await bundledAsset("spec_archive.dml")),
   ]);
   return paths;
 }

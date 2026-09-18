@@ -1,0 +1,10 @@
+% spec_merge — preview merging a change delta into specs/ (read-only).
+% Usage: /dc-run spec_merge <change>
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main(Change) :-
+    sp_archive(Change, plan, Report),
+    answer(Report).
+
+agent_main :-
+    answer("usage: /dc-run spec_merge <change>").

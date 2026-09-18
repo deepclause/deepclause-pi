@@ -419,7 +419,12 @@ Validate and inspect without spending model tokens:
 - `/dc-run spec_status` — capability and delta inventory.
 - `/dc-run spec_query <capability>` — one capability's requirements and scenarios.
 - `/dc-run spec_graph capabilities|changes` — deterministic Mermaid graph.
-- `dc_spec_graph` — pi tool that renders that graph in the diagram viewer.
+- `/dc-run spec_merge <change>` — preview the delta merge into `specs/` (read-only).
+- `/dc-archive <change>` — show the preview, confirm, write the merged spec, then move the
+  change to `changes/archive/`. The DML step (`spec_archive.dml`) is marked `% Mutating: true`,
+  so `/dc-run` refuses it directly; always archive through `/dc-archive` so the merge is reviewed
+  first and the change folder is moved.
+- `dc_spec_graph` — pi tool that renders the capability/change graph in the diagram viewer.
 
 These skills are pure DML utilities: do not add model calls or runtime tools to them, and do
 not rewrite the parser by hand.

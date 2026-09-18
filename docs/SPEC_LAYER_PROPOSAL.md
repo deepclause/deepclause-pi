@@ -10,9 +10,17 @@ DML and the existing `deepclause-pi` plan/executor model.
 Implemented in phase 1: the deterministic engine (`src/assets/specs.dml`), the
 `spec_validate` / `spec_status` / `spec_query` / `spec_graph` skills, `/dc-check`,
 the `dc_spec_graph` tool, and workspace seeding of `specs/`, `changes/` and `lib/`.
-Not yet implemented: `tasks.dml` / `apply.dml`, `spec_archive` / `spec_merge`, the
-`deltas.dml` / `index.dml` files, coverage and discoverability gates in
-`validatePlanSpec`, and the apply-time rollback path.
+
+Implemented in phase 2: delta merging (`sp_archive/3`, `spec_merge.dml`,
+`spec_archive.dml`) and the `/dc-archive` command, which previews the merge,
+confirms, writes `specs/`, and moves the change folder to `changes/archive/`.
+Unchanged requirement blocks are preserved line-for-line. The archive *move* is
+done host-side because directory `rename_file/2` is unreliable in the WASM
+filesystem. `RENAMED` deltas are refused for now.
+
+Not yet implemented: `tasks.dml` / `apply.dml`, the `deltas.dml` / `index.dml`
+files, coverage and discoverability gates in `validatePlanSpec`, and the
+apply-time rollback path.
 
 It builds directly on [DC_PLAN_PROPOSAL.md](DC_PLAN_PROPOSAL.md), which describes
 the shipped `/dc-plan` + `pi_agent_step` architecture. This document does not
@@ -710,7 +718,7 @@ DML is good at, and the kind of failure a grammar prevents.
 | `/opsx:continue`, `/opsx:update` | `/dc-plan update <change> <what>` | pi turn |
 | `/opsx:apply` | `/dc-run <change>` | `apply.dml` + `pi_agent_step` |
 | `/opsx:verify` | `/dc-check <change>` | **pure DML, zero model calls** |
-| `/opsx:archive`, `/opsx:bulk-archive` | `/dc-run spec_archive [change…]` | **pure DML + one confirm** |
+| `/opsx:archive`, `/opsx:bulk-archive` | `/dc-archive <change>` (preview + confirm + merge + move) | **pure DML merge + one confirm** |
 | `/opsx:sync` | `/dc-run spec_sync <change>` | pure DML |
 | `/opsx:onboard` | nothing — pi reads the repo natively | pi turn |
 

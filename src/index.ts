@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -194,6 +194,14 @@ function eventSummary(event: DMLEvent, debug: boolean): string {
     case "usage": return `usage: ${event.usage?.inputTokens ?? 0} in / ${event.usage?.outputTokens ?? 0} out`;
     case "task_activity": return `task ${event.taskState ?? "active"}: ${event.taskDescription ?? event.taskId ?? "task"}`;
     case "memory_compaction": return `compaction ${event.compactionAction ?? "event"}`;
+  }
+}
+
+async function isMutatingSpecSkill(filePath: string): Promise<boolean> {
+  try {
+    return /^%\s*Mutating:\s*true\s*$/m.test(await readFile(filePath, "utf8"));
+  } catch {
+    return false;
   }
 }
 
@@ -839,6 +847,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         "  /dc-list",
         "  /dc-plan <request> [--name=slug]   create an executable contextual DML plan",
         "  /dc-check <change|spec>            validate specs and deltas deterministically",
+        "  /dc-archive <change>              merge a change delta into specs/ and archive it",
         "  /dc-run <skill|path> [args] [--context=turn|branch|isolated]",
         "  /dc-run <skill|path> --verbose   show lifecycle events",
         "  /dc-run <skill|path> --debug     show full event payloads and SDK diagnostics",
@@ -963,6 +972,48 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("dc-archive", {
+    description: "Merge a change delta into specs/ after review, then move the change into changes/archive/",
+    handler: async (rawArgs, ctx) => {
+      if (activeController || !ctx.isIdle()) {
+        ctx.ui.notify("DeepClause or pi is already active; wait before running /dc-archive", "warning");
+        return;
+      }
+      const change = rawArgs.trim();
+      if (!change) {
+        ctx.ui.notify("Usage: /dc-archive <change>", "warning");
+        return;
+      }
+      try {
+        const plan = await runSpecSkill(ctx, "spec_merge", [change]);
+        if (!ctx.hasUI || !await ctx.ui.confirm("Archive change into specs?", plan)) {
+          ctx.ui.notify("Archive cancelled", "warning");
+          return;
+        }
+        const applied = await runSpecSkill(ctx, "spec_archive", [change]);
+        const paths = await initializeWorkspace(ctx.cwd);
+        const from = path.join(paths.changes, change);
+        const stamp = new Date().toISOString().slice(0, 10);
+        await mkdir(path.join(paths.changes, "archive"), { recursive: true });
+        let target = path.join(paths.changes, "archive", `${stamp}-${change}`);
+        try {
+          await access(target);
+          target = `${target}-2`;
+        } catch {
+          // target is free
+        }
+        await rename(from, target);
+        const archivedTo = path.relative(ctx.cwd, target).split(path.sep).join("/");
+        publishResult(pi, `${applied}\n\n  moved to ${archivedTo}`, { skill: "spec_archive", change, archivedTo });
+        ctx.ui.notify(`Archived ${change}`, "info");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        publishResult(pi, `Archive failed: ${message}`, { error: message });
+        ctx.ui.notify(message, "error");
+      }
+    },
+  });
+
   pi.registerCommand("dc-run", {
     description: "Run a DML skill with pi's active model",
     handler: async (rawArgs, ctx) => {
@@ -977,6 +1028,10 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         const paths = await initializeWorkspace(ctx.cwd);
         const config = await loadConfig(paths.config);
         const filePath = await resolveDmlPath(paths, parsed.target);
+        if (await isMutatingSpecSkill(filePath)) {
+          ctx.ui.notify(`${parsed.target} modifies specs/. Use /dc-archive <change> so you can review the merge first.`, "warning");
+          return;
+        }
         const contextualPlan = await isContextualPlan(filePath);
         if (contextualPlan) {
           const requiredTools = await readPlanRequiredTools(filePath);

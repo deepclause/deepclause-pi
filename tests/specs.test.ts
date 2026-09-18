@@ -230,3 +230,173 @@ describe("spec layer wiring", () => {
     await expect(access(graph.details.viewer!)).resolves.toBeUndefined();
   });
 });
+
+const BASE_SPEC = `# Theme Specification
+
+## Purpose
+Lets users choose a theme.
+
+## Requirements
+
+### Requirement: Theme selection
+The app SHALL switch themes.
+
+#### Scenario: Toggle
+- **WHEN** the user toggles
+- **THEN** the theme changes
+
+### Requirement: Legacy theme
+The app SHALL support the legacy theme.
+
+#### Scenario: Legacy
+- **WHEN** legacy is on
+- **THEN** legacy renders
+
+### Requirement: Theme switching
+The app SHALL switch without reload.
+
+#### Scenario: No reload
+- **WHEN** toggling
+- **THEN** no reload happens
+`;
+
+const MERGE_DELTA = `---
+change: add_dark_mode
+---
+
+# Spec Delta
+
+## Purpose
+Lets users choose between light and dark themes.
+
+## ADDED Requirements
+
+### Requirement: System-preference default
+The app SHALL default to the OS preference.
+
+#### Scenario: First run
+- **WHEN** no stored theme
+- **THEN** the OS preference applies
+
+## MODIFIED Requirements
+
+### Requirement: Theme switching
+The app SHALL switch themes immediately without a reload.
+
+#### Scenario: No reload
+- **WHEN** toggling
+- **THEN** the visible theme updates in place
+
+## REMOVED Requirements
+
+### Requirement: Legacy theme
+**Reason**: Replaced by runtime theming.
+**Migration**: Use the theme toggle.
+
+#### Scenario: Legacy
+- **WHEN** legacy is on
+- **THEN** legacy renders
+`;
+
+describe("spec merge and archive", () => {
+  it("previews without writing, then applies and archives", async () => {
+    const cwd = await workspace({
+      ".pi/deepclause/specs/ui/theme.spec.md": BASE_SPEC,
+      ".pi/deepclause/changes/add_dark_mode/specs/ui/theme.spec.md": MERGE_DELTA,
+    });
+    const specPath = path.join(cwd, ".pi", "deepclause", "specs", "ui", "theme.spec.md");
+
+    const plan = await runLibrary(cwd, `sp_archive("add_dark_mode", plan, R), answer(R)`);
+    expect(plan.errors).toEqual([]);
+    expect(plan.answer).toContain("spec archive [plan (read-only)]: add_dark_mode");
+    expect(plan.answer).toContain("ui/theme");
+    // read-only: the spec is untouched
+    expect(await readFile(specPath, "utf8")).toBe(BASE_SPEC);
+
+    const apply = await runLibrary(cwd, `sp_archive("add_dark_mode", apply, R), answer(R)`);
+    expect(apply.errors).toEqual([]);
+    expect(apply.answer).toContain("spec archive [apply]: add_dark_mode");
+
+    const merged = await readFile(specPath, "utf8");
+    // MODIFIED requirement replaced
+    expect(merged).toContain("The app SHALL switch themes immediately without a reload.");
+    expect(merged).not.toContain("The app SHALL switch without reload.");
+    // ADDED requirement appended
+    expect(merged).toContain("System-preference default");
+    expect(merged).toContain("- **WHEN** no stored theme");
+    // REMOVED requirement dropped
+    expect(merged).not.toContain("Legacy theme");
+    // untouched requirement preserved line-for-line
+    expect(merged).toContain("- **WHEN** the user toggles\n- **THEN** the theme changes");
+    expect(merged).toContain("## Purpose\nLets users choose a theme.");
+
+    // the skill writes specs/ but leaves the change folder for the /dc-archive command to move
+    const stillThere = await runLibrary(cwd, `catch(directory_files(".pi/deepclause/changes/add_dark_mode", _), _, fail), answer("present")`);
+    expect(stillThere.answer).toBe("present");
+  });
+});
+
+describe("dc-archive command", () => {
+  it("merges into specs/, moves the change folder, and confirms first", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "dc-archive-"));
+    const { initializeWorkspace } = await import("../src/workspace.js");
+    const paths = await initializeWorkspace(cwd);
+    await mkdir(path.join(paths.specs, "ui"), { recursive: true });
+    await writeFile(path.join(paths.specs, "ui", "theme.spec.md"), BASE_SPEC, "utf8");
+    await mkdir(path.join(paths.changes, "add_dark_mode", "specs", "ui"), { recursive: true });
+    await writeFile(path.join(paths.changes, "add_dark_mode", "specs", "ui", "theme.spec.md"), MERGE_DELTA, "utf8");
+
+    const { default: deepClauseExtension } = await import("../src/index.js");
+    const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+    const eventHandlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    const tools = new Map<string, unknown>();
+    const customMessages: Array<{ content: string }> = [];
+    const notifications: string[] = [];
+    let activeTools = ["read", "bash"];
+    const pi = {
+      registerCommand(name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) { commands.set(name, def); },
+      registerTool(def: { name: string }) { tools.set(def.name, def); },
+      on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { eventHandlers.set(name, handler); },
+      getActiveTools: () => [...activeTools],
+      getAllTools: () => [],
+      setActiveTools(names: string[]) { activeTools = [...names]; },
+      getThinkingLevel: () => "medium",
+      sendMessage(message: { content: string }) { customMessages.push(message); },
+      sendUserMessage() {},
+      async exec() { return { stdout: "", stderr: "", code: 0, killed: false }; },
+    };
+    const ctx = {
+      cwd,
+      model: { provider: "test", id: "model" },
+      modelRegistry: { hasConfiguredAuth: () => true, async complete() { throw new Error("model must not be called while archiving"); } },
+      sessionManager: { getBranch: () => [] },
+      thinkingLevel: "medium",
+      isIdle: () => true,
+      hasUI: true,
+      abort() {},
+      ui: {
+        notify(message: string) { notifications.push(message); },
+        async input() { return undefined; },
+        async confirm() { return true; },
+        setStatus() {},
+        setWidget() {},
+      },
+    };
+    deepClauseExtension(pi as never);
+    await (eventHandlers.get("session_start") as (event: unknown, ctx: unknown) => Promise<unknown>)({}, ctx);
+
+    await commands.get("dc-archive")!.handler("add_dark_mode", ctx);
+
+    const last = customMessages.at(-1)?.content ?? "";
+    expect(last).toContain("spec archive [apply]: add_dark_mode");
+    expect(last).toContain("moved to");
+
+    const merged = await readFile(path.join(paths.specs, "ui", "theme.spec.md"), "utf8");
+    expect(merged).toContain("System-preference default");
+    expect(merged).not.toContain("Legacy theme");
+
+    await expect(access(path.join(paths.changes, "add_dark_mode"))).rejects.toThrow();
+    const archiveEntries = await (await import("node:fs/promises")).readdir(path.join(paths.changes, "archive"));
+    expect(archiveEntries.some((entry) => entry.endsWith("add_dark_mode"))).toBe(true);
+  });
+});

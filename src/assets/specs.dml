@@ -476,3 +476,231 @@ sp_graph(capabilities, Mermaid) :-
 
 sp_graph(_, Mermaid) :-
     sp_graph(capabilities, Mermaid).
+
+%% ---------------------------------------------------------------------------
+%% Merge and archive
+%%
+%% Reads an existing capability spec plus a change delta and produces the merged
+%% spec. Unchanged requirement blocks are preserved line-for-line; only added,
+%% modified and removed requirements change. RENAMED is refused for now.
+%% ---------------------------------------------------------------------------
+
+sp_line_at([line(Line, N)|_], N, Line) :- !.
+sp_line_at([_|Rest], N, Line) :- sp_line_at(Rest, N, Line).
+
+sp_raw_lines(List, Lines) :- findall(Line, member(line(Line, _), List), Lines).
+
+sp_last([X], X) :- !.
+sp_last([_|Rest], X) :- sp_last(Rest, X).
+
+%% Purpose + delta operations, including the delta's ## Purpose section.
+sp_parse_delta_full(Text, Purpose, Deltas) :-
+    sp_lines(Text, Lines),
+    sp_sections(Lines, Sections),
+    (   member(section(2, "Purpose", _, PurposeBody), Sections)
+    ->  sp_prose(PurposeBody, Purpose)
+    ;   Purpose = ""
+    ),
+    sp_drop_to_op(Sections, Rest),
+    sp_collect_ops(Rest, Deltas).
+
+%% Existing requirements with their source line ranges.
+sp_spec_ranges(Text, Reqs) :-
+    sp_lines(Text, Lines),
+    sp_sections(Lines, Sections),
+    findall(req_range(Name, Start, End, Desc, Scenarios), (
+        member(section(3, Heading, Start, Body), Sections),
+        sp_requirement_name(Heading, Name),
+        sp_body_end(Body, Start, End),
+        sp_requirement_body(Body, Desc, Scenarios)
+    ), Reqs).
+
+sp_body_end([], Start, Start).
+sp_body_end(Body, Start, End) :-
+    findall(N, member(line(_, N), Body), Numbers),
+    (   Numbers == []
+    ->  End = Start
+    ;   sp_last(Numbers, End)
+    ).
+
+sp_read_optional(Path, Text) :-
+    (   catch(read_file_to_string(Path, Text0, []), _, fail)
+    ->  Text = Text0
+    ;   Text = none
+    ).
+
+sp_write_file(Path, Text) :-
+    open(Path, write, Stream),
+    write(Stream, Text),
+    close(Stream).
+
+%% Delta helpers.
+sp_delta_ops(Deltas, Op, Reqs) :-
+    findall(Req, (member(delta(Op, Group), Deltas), member(Req, Group)), Reqs).
+
+sp_delta_has(Deltas, Op, Name) :-
+    member(delta(Op, Group), Deltas),
+    member(req(Name, _, _, _), Group),
+    !.
+
+sp_delta_req(Deltas, Op, Name, Req) :-
+    member(delta(Op, Group), Deltas),
+    member(Req, Group),
+    Req = req(Name, _, _, _),
+    !.
+
+sp_delta_op_summary(Deltas, Ops) :-
+    findall(op(Op, Name), (
+        member(delta(Op, Group), Deltas),
+        member(req(Name, _, _, _), Group)
+    ), Ops).
+
+%% Canonical rendering of one requirement and its scenarios.
+sp_render_requirement(req(Name, _, Desc, Scenarios), Lines) :-
+    format(string(Heading), "### Requirement: ~w", [Name]),
+    findall(Block, (member(Scenario, Scenarios), sp_render_scenario(Scenario, Block)), Blocks),
+    append(Blocks, Flat),
+    (   Desc == ""
+    ->  Head = [Heading, ""]
+    ;   Head = [Heading, "", Desc, ""]
+    ),
+    append(Head, Flat, Lines).
+
+sp_render_scenario(scenario(Name, _, Steps), Lines) :-
+    format(string(Heading), "#### Scenario: ~w", [Name]),
+    append([Heading|Steps], [""], Lines).
+
+sp_render_new_spec(Capability, Purpose, Deltas, Lines) :-
+    format(string(Title), "# ~w Specification", [Capability]),
+    sp_delta_ops(Deltas, added, Added),
+    findall(Block, (member(Req, Added), sp_render_requirement(Req, Block)), Blocks),
+    append(Blocks, Flat),
+    (   Purpose == ""
+    ->  Head = [Title, "", "## Purpose", "", "## Requirements", ""]
+    ;   Head = [Title, "", "## Purpose", "", Purpose, "", "## Requirements", ""]
+    ),
+    append(Head, Flat, Lines).
+
+%% Merge actions: drop or replace one existing requirement block.
+sp_build_actions([], _, []).
+sp_build_actions([req_range(Name, Start, End, _, _)|Rest], Deltas, Actions) :-
+    (   sp_delta_has(Deltas, removed, Name)
+    ->  Action = op(Start, End, drop)
+    ;   sp_delta_req(Deltas, modified, Name, NewReq)
+    ->  sp_render_requirement(NewReq, NewLines),
+        Action = op(Start, End, replace(NewLines))
+    ;   Action = none
+    ),
+    sp_build_actions(Rest, Deltas, RestActions),
+    (   Action == none
+    ->  Actions = RestActions
+    ;   Actions = [Action|RestActions]
+    ).
+
+sp_skip_to([], _, []).
+sp_skip_to([line(_, N)|Rest], End, Tail) :-
+    N =< End,
+    !,
+    sp_skip_to(Rest, End, Tail).
+sp_skip_to(List, _, List).
+
+sp_merge_walk([], _, []).
+sp_merge_walk([line(Line, N)|Rest], Actions, Out) :-
+    (   memberchk(op(N, End, drop), Actions)
+    ->  sp_skip_to(Rest, End, Tail),
+        sp_merge_walk(Tail, Actions, Out)
+    ;   memberchk(op(N, End, replace(NewLines)), Actions)
+    ->  sp_skip_to(Rest, End, Tail),
+        sp_merge_walk(Tail, Actions, Out1),
+        append(NewLines, Out1, Out)
+    ;   Out = [Line|Out1],
+        sp_merge_walk(Rest, Actions, Out1)
+    ).
+
+sp_added_lines(Deltas, Lines) :-
+    sp_delta_ops(Deltas, added, Added),
+    (   Added == []
+    ->  Lines = []
+    ;   findall(Block, (member(Req, Added), sp_render_requirement(Req, Block)), Blocks),
+        append(Blocks, Flat),
+        Lines = [""|Flat]
+    ).
+
+%% Merge one delta file into its capability spec.
+sp_do_merge(Capability, Purpose, Deltas, SpecPath, Mode, Ops) :-
+    sp_delta_op_summary(Deltas, Ops),
+    sp_read_optional(SpecPath, Existing),
+    (   Existing == none
+    ->  sp_render_new_spec(Capability, Purpose, Deltas, Lines)
+    ;   sp_lines(Existing, Numbered),
+        sp_spec_ranges(Existing, Reqs),
+        sp_build_actions(Reqs, Deltas, Actions),
+        sp_merge_walk(Numbered, Actions, Preserved),
+        sp_added_lines(Deltas, Added),
+        append(Preserved, Added, Lines)
+    ),
+    (   Mode == apply
+    ->  atomics_to_string(Lines, "\n", Joined),
+        (   sub_string(Joined, _, 1, 0, "\n")
+        ->  Text = Joined
+        ;   string_concat(Joined, "\n", Text)
+        ),
+        sp_write_file(SpecPath, Text)
+    ;   true
+    ).
+
+sp_spec_relpath(File, Rel) :-
+    sub_string(File, Before, _, _, "/specs/"),
+    After is Before + 7,
+    sub_string(File, After, _, 0, Rel).
+
+sp_spec_path_from_delta(File, SpecPath) :-
+    sp_spec_relpath(File, Rel),
+    atomic_list_concat([".pi/deepclause/specs/", Rel], SpecPath).
+
+sp_merge_capability(File, Mode, Result) :-
+    read_file_to_string(File, DeltaText, []),
+    sp_parse_delta_full(DeltaText, Purpose, Deltas),
+    sp_capability_id(File, Capability),
+    sp_spec_path_from_delta(File, SpecPath),
+    sp_delta_ops(Deltas, renamed, RenamedOps),
+    (   RenamedOps \= []
+    ->  Result = result(Capability, SpecPath, [], error("RENAMED requirements are not supported by spec_archive yet"))
+    ;   (   catch(sp_do_merge(Capability, Purpose, Deltas, SpecPath, Mode, Ops), Err,
+                  (format(string(Message), "merge failed: ~w", [Err]), Ops = error(Message)))
+        ->  (   Ops = error(Message)
+            ->  Result = result(Capability, SpecPath, [], error(Message))
+            ;   Result = result(Capability, SpecPath, Ops, ok)
+            )
+        ;   Result = result(Capability, SpecPath, [], error("merge failed"))
+        )
+    ).
+
+sp_archive_result_line(result(Capability, SpecPath, Ops, ok), Line) :-
+    length(Ops, Count),
+    format(string(Line), "  ~w -> ~w  (~w changes)", [Capability, SpecPath, Count]).
+sp_archive_result_line(result(Capability, SpecPath, _, error(Reason)), Line) :-
+    format(string(Line), "  ~w -> ~w  ERROR: ~w", [Capability, SpecPath, Reason]).
+
+sp_archive(Change, Mode, Report) :-
+    atomic_list_concat([".pi/deepclause/changes/", Change], ChangeDir),
+    (   catch(directory_files(ChangeDir, _), _, fail)
+    ->  sp_change_delta_files(ChangeDir, DeltaFiles),
+        findall(R, (member(File, DeltaFiles), sp_merge_capability(File, Mode, R)), Results),
+        sp_archive_render(Change, Mode, Results, Body),
+        atomics_to_string(Body, "\n", Report)
+    ;   format(string(Report), "unknown change: ~w", [Change])
+    ).
+
+sp_archive_render(Change, Mode, Results, Lines) :-
+    (   Mode == apply
+    ->  Verb = "apply"
+    ;   Verb = "plan (read-only)"
+    ),
+    format(string(Header), "spec archive [~w]: ~w", [Verb, Change]),
+    findall(ResultLine, (member(Result, Results), sp_archive_result_line(Result, ResultLine)), ResultLines),
+    (   ResultLines == []
+    ->  Body = ["  no delta files found"]
+    ;   Body = ResultLines
+    ),
+    append([Header, ""], Body, Lines).
