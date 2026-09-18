@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 - 2026-09-18
+
+- Add **deepclause-pi speckit**: spec-driven changes on top of the pi runtime.
+- Store behaviour specs as plain Markdown under `.pi/deepclause/specs/`, with reviewable change deltas under `.pi/deepclause/changes/<slug>/` (proposal, delta specs, optional design, `tasks.dml`).
+- Add a deterministic DML spec engine: spec/delta parsing, structural validation, lossless delta merge, and scenario coverage — no model calls.
+- Add `/dc-plan --change=<slug>` to write `changes/<slug>/tasks.dml`; `--update` regenerates it and resets task statuses.
+- Add `/dc-check` to validate specs, deltas and coverage, and `dc_spec_graph` / `/dc-run spec_graph` for capability and change graphs in the offline Mermaid viewer.
+- Add `/dc-apply` to execute tasks with declarative checks (`exists`, `cmd`, `model`), bounded retry that feeds failure evidence into the repair step, git snapshotting, resume after interruption, and `--abort` rollback.
+- Add `/dc-archive` to merge a delta into `specs/` after confirmation and move the change into `changes/archive/`; merging refuses `MODIFIED`/`REMOVED` entries that do not exist in the target spec.
+- Add commit prompts after `/dc-plan`, `/dc-apply` and `/dc-archive`.
+- Add skills `spec_validate`, `spec_status`, `spec_query`, `spec_coverage`, `spec_scaffold`, `spec_merge`, `spec_archive`, `spec_apply` and `spec_graph`; seed `lib/specs.dml`, `lib/apply.dml`, `specs/` and `changes/` non-destructively.
+- Fix `sp_graph` view dispatch so string CLI arguments select the requested view instead of falling through to the capabilities default.
+- Add the [deepclause-pi speckit guide](docs/SPECKIT.md) and the [design proposal](docs/SPEC_LAYER_PROPOSAL.md).
+
 ## 0.2.0 - 2026-09-17
 
 - Ask pi for a diagram of any DML file and get a self-contained offline Mermaid viewer.
