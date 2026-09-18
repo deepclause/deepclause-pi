@@ -789,7 +789,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             const viewer = displayPath(ctx.cwd, build.viewerPath);
             return {
               content: [{ type: "text", text: `Created spec graph (${view}). Viewer: ${viewer}${opened ? " (opened in your browser)" : ""}` }],
-              details: { success: true, view, viewer, opened },
+              details: { success: true, view, viewer, viewerPath: build.viewerPath, opened },
             };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

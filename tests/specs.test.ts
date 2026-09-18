@@ -257,12 +257,15 @@ describe("spec layer wiring", () => {
     expect(notifications.some((message) => message.includes("Spec check passed"))).toBe(true);
 
     const graphTool = tools.get("dc_spec_graph") as {
-      execute: (id: string, params: unknown, signal: unknown, update: unknown, ctx: unknown) => Promise<{ details: { success?: boolean; viewer?: string } }>;
+      execute: (id: string, params: unknown, signal: unknown, update: unknown, ctx: unknown) => Promise<{ details: { success?: boolean; viewer?: string; viewerPath?: string } }>;
     };
     const graph = await graphTool.execute("id", { view: "capabilities" }, undefined, undefined, ctx);
     expect(graph.details.success).toBe(true);
     expect(graph.details.viewer).toBeTruthy();
-    await expect(access(graph.details.viewer!)).resolves.toBeUndefined();
+    // assert on the absolute path: the display path is workspace-relative and would
+    // otherwise resolve against process.cwd() instead of the temp workspace
+    expect(graph.details.viewerPath).toBeTruthy();
+    await expect(access(graph.details.viewerPath!)).resolves.toBeUndefined();
   });
 });
 
