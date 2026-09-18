@@ -443,6 +443,11 @@ Validate and inspect without spending model tokens:
   `done`/`failed` statuses are **preserved**: re-run `/dc-apply <change>` to resume from the
   remaining tasks, or `/dc-apply <change> --abort` to discard the apply and restore the snapshot.
   A dirty tree refuses a fresh snapshot, so the apply then proceeds without rollback.
+
+After `/dc-plan`, `/dc-apply` and `/dc-archive` leave uncommitted changes, the extension offers
+to commit them (`git add -A` with a suggested message) or reminds you to. A clean tree is what
+lets the next `/dc-apply` take a rollback snapshot; consider gitignoring
+`.pi/deepclause/diagrams/` and `.pi/deepclause/changes/*/change.json`.
 - `/dc-archive <change>` — show the preview, confirm, write the merged spec, then move the
   change to `changes/archive/`. The DML step (`spec_archive.dml`) is marked `% Mutating: true`,
   so `/dc-run` refuses it directly; always archive through `/dc-archive` so the merge is reviewed

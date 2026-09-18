@@ -31,6 +31,11 @@ into the repair instruction, and a managed `plan_task_status/2` write-back block
 `/dc-apply <change>`, which previews the tasks and the exact command set, confirms,
 then applies with `pi_agent_step` and `dc_verify_run` enabled.
 
+Implemented in phase 8: commit prompts. After `/dc-plan`, `/dc-apply` and `/dc-archive`
+leave a dirty tree, the extension shows the changed files and offers to commit them
+(`git add -A` plus a suggested `<action>: <change>` message), or reminds the user when
+they decline. A clean tree is what lets the next `/dc-apply` take a rollback snapshot.
+
 Not yet implemented: the `deltas.dml` / `index.dml` files, and `RENAMED` support in merge.
 
 Implemented in phase 7: resumable apply and a merge guard. `/dc-plan --change` fails

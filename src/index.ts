@@ -225,6 +225,48 @@ async function isMutatingSpecSkill(filePath: string): Promise<boolean> {
   }
 }
 
+/**
+ * After a step that leaves the tree dirty, offer to commit it (or remind the user).
+ * A clean tree is what lets the next /dc-apply take a rollback snapshot.
+ */
+export async function offerCommit(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  action: string,
+  change: string,
+): Promise<void> {
+  let status;
+  try {
+    status = await pi.exec("git", ["status", "--porcelain"], { cwd: ctx.cwd });
+  } catch {
+    return;
+  }
+  if (status.code !== 0) return; // not a repository: nothing to say
+  const files = status.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (files.length === 0) return; // clean
+
+  const message = `${action}: ${change}`;
+  const listed = files.slice(0, 12).join("\n");
+  const more = files.length > 12 ? `\n… and ${files.length - 12} more` : "";
+  const reminder = `${files.length} changed file(s):\n${listed}${more}\n\ngit add -A && git commit -m "${message}"`;
+
+  if (!ctx.hasUI) {
+    ctx.ui.notify(`Uncommitted changes. ${reminder}`, "warning");
+    return;
+  }
+  if (!await ctx.ui.confirm("Commit these changes?", `${reminder}\n\nCommit now?`)) {
+    ctx.ui.notify(`Remember to commit before continuing. ${reminder}`, "warning");
+    return;
+  }
+  await pi.exec("git", ["add", "-A"], { cwd: ctx.cwd });
+  const commit = await pi.exec("git", ["commit", "-m", message], { cwd: ctx.cwd });
+  if (commit.code === 0) {
+    ctx.ui.notify(`Committed: ${message}`, "info");
+  } else {
+    ctx.ui.notify(`Commit failed: ${commit.stderr.trim() || "see git output"}`, "error");
+  }
+}
+
 async function listDmlFiles(directory: string, prefix = ""): Promise<string[]> {
   let entries;
   try {
@@ -344,6 +386,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
               : await writePlanNonDestructively(paths, plan.spec.slug, content);
             transaction.committed = true;
             setPlanCommitActive(false);
+            await offerCommit(pi, ctx, "plan", transaction.change ? normalizePlanSlug(transaction.change) : plan.spec.slug);
             const relativePath = path.relative(paths.root, filePath).split(path.sep).join("/");
             const text = [
               transaction.change
@@ -1070,6 +1113,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         const archivedTo = path.relative(ctx.cwd, target).split(path.sep).join("/");
         publishResult(pi, `${applied}\n\n  moved to ${archivedTo}`, { skill: "spec_archive", change, archivedTo });
         ctx.ui.notify(`Archived ${change}`, "info");
+        await offerCommit(pi, ctx, "archive", change);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         publishResult(pi, `Archive failed: ${message}`, { error: message });
@@ -1132,6 +1176,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             );
           }
         }
+        if (succeeded) await offerCommit(pi, ctx, "apply", change);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         publishResult(pi, `Apply failed: ${message}`, { error: message });
