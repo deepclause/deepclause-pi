@@ -54,7 +54,7 @@ Contextual plans require explicit user execution with `/dc-run plans/<name>.dml`
 
 ### Change plans
 
-`/dc-plan <request> --change=<slug>` targets a change instead of `plans/`. The same planning turn first creates `changes/<slug>/` with normal file tools (proposal.md, one delta spec per capability under `specs/`, optional design.md), then commits `changes/<slug>/tasks.dml`: `plan_task/2` facts with `satisfies` (scenario ids) and declarative `checks`, plus the managed `plan_task_status/2` block. Every step must declare at least one check. Review it with `/dc-check <slug>` and execute it with `/dc-apply <slug>`.
+`/dc-plan <request> --change=<slug>` targets a change instead of `plans/`. The same planning turn first creates `changes/<slug>/` with normal file tools (proposal.md, one delta spec per capability under `specs/`, optional design.md), then commits `changes/<slug>/tasks.dml`: `plan_task/2` facts with `satisfies` (scenario ids) and declarative `checks`, plus the managed `plan_task_status/2` block. Every step must declare at least one check. Re-running the same change without `--update` fails once `tasks.dml` exists; `--update` (or a leading `update` keyword) regenerates it and resets every status to pending. Review it with `/dc-check <slug>` and execute it with `/dc-apply <slug>`.
 
 ## Program structure and arguments
 
@@ -439,9 +439,10 @@ Validate and inspect without spending model tokens:
   (`exists`, `cmd`, `model`), retry with the failure feedback (up to 3 attempts), and rewrite the
   `plan_task_status/2` block in `tasks.dml`. The `cmd(...)` set is approved once before the run;
   each command runs through the allowlisted `dc_verify_run` tool. A git snapshot is recorded first
-  (in `change.json`); if the run does not end with `status: OK` — including cancellation — the
-  working tree is restored. A dirty tree refuses the snapshot, so the apply then proceeds without
-  rollback.
+  (in `change.json`, with `applyState`). If the run does not finish, the working tree and the
+  `done`/`failed` statuses are **preserved**: re-run `/dc-apply <change>` to resume from the
+  remaining tasks, or `/dc-apply <change> --abort` to discard the apply and restore the snapshot.
+  A dirty tree refuses a fresh snapshot, so the apply then proceeds without rollback.
 - `/dc-archive <change>` — show the preview, confirm, write the merged spec, then move the
   change to `changes/archive/`. The DML step (`spec_archive.dml`) is marked `% Mutating: true`,
   so `/dc-run` refuses it directly; always archive through `/dc-archive` so the merge is reviewed

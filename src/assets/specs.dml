@@ -636,9 +636,11 @@ sp_do_merge(Capability, Purpose, Deltas, SpecPath, Mode, Ops) :-
     sp_delta_op_summary(Deltas, Ops),
     sp_read_optional(SpecPath, Existing),
     (   Existing == none
-    ->  sp_render_new_spec(Capability, Purpose, Deltas, Lines)
+    ->  sp_require_added_only(Deltas),
+        sp_render_new_spec(Capability, Purpose, Deltas, Lines)
     ;   sp_lines(Existing, Numbered),
         sp_spec_ranges(Existing, Reqs),
+        sp_require_targets(Deltas, Reqs),
         sp_build_actions(Reqs, Deltas, Actions),
         sp_merge_walk(Numbered, Actions, Preserved),
         sp_added_lines(Deltas, Added),
@@ -652,6 +654,39 @@ sp_do_merge(Capability, Purpose, Deltas, SpecPath, Mode, Ops) :-
         ),
         sp_write_file(SpecPath, Text)
     ;   true
+    ).
+
+sp_merge_error_message(error(merge_error(Message)), Message) :- !.
+sp_merge_error_message(Err, Message) :- format(string(Message), "merge failed: ~w", [Err]).
+
+%% A brand-new capability may only add requirements.
+sp_require_added_only(Deltas) :-
+    findall(Op, (member(delta(Op, Reqs), Deltas), (Op == modified ; Op == removed), Reqs \= []), Ops0),
+    sort(Ops0, Ops),
+    (   Ops == []
+    ->  true
+    ;   atomics_to_string(Ops, ", ", OpList),
+        format(string(Message), "~w operations need an existing spec; only ## ADDED Requirements is allowed for a new capability", [OpList]),
+        throw(error(merge_error(Message)))
+    ).
+
+%% MODIFIED and REMOVED must name requirements that exist in the target spec.
+sp_require_targets(Deltas, Reqs) :-
+    findall(Name, (
+        member(delta(Op, Group), Deltas),
+        ( Op == modified ; Op == removed ),
+        member(req(Name, _, _, _), Group)
+    ), Targets0),
+    sort(Targets0, Targets),
+    findall(BaseName, member(req_range(BaseName, _, _, _, _), Reqs), BaseNames0),
+    sort(BaseNames0, BaseNames),
+    findall(Name, (member(Name, Targets), \+ memberchk(Name, BaseNames)), Missing0),
+    sort(Missing0, Missing),
+    (   Missing == []
+    ->  true
+    ;   atomics_to_string(Missing, ", ", MissingList),
+        format(string(Message), "MODIFIED/REMOVED requirements not found in the target spec: ~w", [MissingList]),
+        throw(error(merge_error(Message)))
     ).
 
 sp_spec_relpath(File, Rel) :-
@@ -672,7 +707,7 @@ sp_merge_capability(File, Mode, Result) :-
     (   RenamedOps \= []
     ->  Result = result(Capability, SpecPath, [], error("RENAMED requirements are not supported by spec_archive yet"))
     ;   (   catch(sp_do_merge(Capability, Purpose, Deltas, SpecPath, Mode, Ops), Err,
-                  (format(string(Message), "merge failed: ~w", [Err]), Ops = error(Message)))
+                  (sp_merge_error_message(Err, Message), Ops = error(Message)))
         ->  (   Ops = error(Message)
             ->  Result = result(Capability, SpecPath, [], error(Message))
             ;   Result = result(Capability, SpecPath, Ops, ok)

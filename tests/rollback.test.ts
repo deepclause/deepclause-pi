@@ -77,3 +77,25 @@ describe("apply rollback", () => {
     await expect(gitRestore(exec, cwd, changeJson)).resolves.toBeNull();
   });
 });
+
+describe("apply resume", () => {
+  it("reuses the recorded snapshot on a dirty tree while an apply is in progress", async () => {
+    const { cwd, changeJson } = await repo();
+    const ref = await gitSnapshot(exec, cwd, changeJson);
+    expect(JSON.parse(await readFile(changeJson, "utf8")).applyState).toBe("in_progress");
+
+    // a partial apply dirties the tree, but the run resumes from the original ref
+    await writeFile(path.join(cwd, "src", "app.ts"), "export const app = 3;\n");
+    const resumed = await gitSnapshot(exec, cwd, changeJson);
+    expect(resumed).toBe(ref);
+  });
+
+  it("clears the snapshot and marks the apply done on accept", async () => {
+    const { cwd, changeJson } = await repo();
+    await gitSnapshot(exec, cwd, changeJson);
+    await gitAccept(changeJson);
+    const state = JSON.parse(await readFile(changeJson, "utf8"));
+    expect(state.snapshot).toBeNull();
+    expect(state.applyState).toBe("done");
+  });
+});

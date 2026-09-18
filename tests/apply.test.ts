@@ -179,3 +179,52 @@ describe("apply rollback wiring", () => {
     }
   });
 });
+
+describe("apply resume", () => {
+  it("skips tasks already marked done", async () => {
+    const cwd = await workspace();
+    await writeFile(
+      path.join(cwd, ".pi", "deepclause", "changes", "c", "tasks.dml"),
+      `plan_task("1.1", task{executor: pi, do: "one", tools: ["read"], expected: "x", satisfies: [], checks: [exists("src/toggle.tsx")]}).
+plan_task("1.2", task{executor: pi, do: "two", tools: ["read"], expected: "y", satisfies: [], checks: [exists("src/toggle.tsx")]}).
+
+% --- execution state (managed by apply.dml; do not edit by hand) ---
+plan_task_status("1.1", done(1)).
+plan_task_status("1.2", pending).
+`,
+    );
+    const skill = await readFile(SKILL_SOURCE, "utf8");
+    const calls: string[] = [];
+    const sdk = await createDeepClause({
+      model: "apply-test",
+      llmBackend: { async complete() { return { text: "unused" }; } },
+    });
+    try {
+      sdk.registerTool("pi_agent_step", {
+        description: "stub",
+        parameters: { type: "object", properties: { instruction: { type: "string" } }, required: ["instruction"] },
+        execute: async (args) => { calls.push(String(args.instruction)); return "done"; },
+      });
+      sdk.registerTool("dc_verify_run", {
+        description: "stub",
+        parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+        execute: async () => ({ exitCode: 0 }),
+      });
+      sdk.registerTool("dc_apply_snapshot", { description: "stub", parameters: { type: "object", properties: {}, required: [] }, execute: async () => "abc1234" });
+      sdk.registerTool("dc_apply_accept", { description: "stub", parameters: { type: "object", properties: {}, required: [] }, execute: async () => "accepted" });
+      sdk.setToolPolicy({ mode: "whitelist", tools: ["pi_agent_step", "dc_verify_run", "dc_apply_snapshot", "dc_apply_accept"] });
+
+      const events = [];
+      for await (const event of sdk.runDML(skill, { workspacePath: cwd, args: ["c", "apply"] })) events.push(event);
+      const answer = events.find((event) => event.type === "answer")?.content ?? "";
+      const output = events.filter((event) => event.type === "output").map((event) => event.content ?? "");
+      expect(output.some((line) => line.includes("1 remaining"))).toBe(true);
+      expect(answer).toContain("2/2 tasks verified");
+      expect(answer).toContain("status: OK");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain("Task 1.2");
+    } finally {
+      await sdk.dispose();
+    }
+  });
+});

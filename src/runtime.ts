@@ -21,12 +21,12 @@ export const DC_APPLY_SNAPSHOT_TOOL = "dc_apply_snapshot";
 export const DC_APPLY_ACCEPT_TOOL = "dc_apply_accept";
 export const DC_APPLY_RESTORE_TOOL = "dc_apply_restore";
 
-async function readSnapshot(changeJsonPath: string): Promise<string | null> {
+async function readChangeJson(changeJsonPath: string): Promise<Record<string, unknown>> {
   try {
-    const parsed = JSON.parse(await readFile(changeJsonPath, "utf8")) as Record<string, unknown>;
-    return typeof parsed.snapshot === "string" && parsed.snapshot ? parsed.snapshot : null;
+    const parsed: unknown = JSON.parse(await readFile(changeJsonPath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
@@ -41,31 +41,40 @@ async function patchChangeJson(changeJsonPath: string, patch: Record<string, unk
   await writeFile(changeJsonPath, `${JSON.stringify({ ...existing, ...patch }, null, 2)}\n`, "utf8");
 }
 
-/** Record a git snapshot ref, refusing a dirty working tree. */
+/**
+ * Record a git snapshot ref, refusing a dirty working tree. If an apply is already
+ * in progress for this change, the existing ref is returned so the run resumes
+ * instead of starting over or rejecting the (intentionally) dirty tree.
+ */
 export async function gitSnapshot(pi: Pick<ExtensionAPI, "exec">, cwd: string, changeJsonPath: string): Promise<string> {
+  const existing = await readChangeJson(changeJsonPath);
+  const resumable = typeof existing.snapshot === "string" && existing.snapshot && existing.applyState === "in_progress";
+  if (resumable) return existing.snapshot as string;
+
   const status = await pi.exec("git", ["status", "--porcelain"], { cwd });
   if (status.code !== 0) throw new Error("git is unavailable or this is not a repository");
-  if (status.stdout.trim()) throw new Error("working tree is dirty; commit or stash before applying");
+  if (status.stdout.trim()) throw new Error("working tree is dirty; commit or stash before applying, or resume with /dc-apply (which preserves an interrupted apply)");
   const head = await pi.exec("git", ["rev-parse", "HEAD"], { cwd });
   if (head.code !== 0) throw new Error("could not read git HEAD");
   const ref = head.stdout.trim();
-  await patchChangeJson(changeJsonPath, { snapshot: ref });
+  await patchChangeJson(changeJsonPath, { snapshot: ref, applyState: "in_progress" });
   return ref;
 }
 
 /** Restore the recorded snapshot (hard reset plus clean of untracked files). */
 export async function gitRestore(pi: Pick<ExtensionAPI, "exec">, cwd: string, changeJsonPath: string): Promise<string | null> {
-  const ref = await readSnapshot(changeJsonPath);
+  const existing = await readChangeJson(changeJsonPath);
+  const ref = typeof existing.snapshot === "string" && existing.snapshot ? existing.snapshot : null;
   if (!ref) return null;
   await pi.exec("git", ["reset", "--hard", ref], { cwd });
   await pi.exec("git", ["clean", "-fd"], { cwd });
-  await patchChangeJson(changeJsonPath, { snapshot: null });
+  await patchChangeJson(changeJsonPath, { snapshot: null, applyState: "aborted" });
   return ref;
 }
 
-/** Mark the apply accepted so the safety net does not restore it. */
+/** Mark the apply accepted and clear the snapshot. */
 export async function gitAccept(changeJsonPath: string): Promise<void> {
-  await patchChangeJson(changeJsonPath, { snapshot: null });
+  await patchChangeJson(changeJsonPath, { snapshot: null, applyState: "done" });
 }
 
 export type BashApproval = (command: string, signal: AbortSignal) => Promise<boolean>;

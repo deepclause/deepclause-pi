@@ -63,6 +63,7 @@ interface ParsedPlan {
   request: string;
   name?: string;
   change?: string;
+  update?: boolean;
   debug: boolean;
 }
 
@@ -70,6 +71,7 @@ interface PlanningTransaction {
   snapshot: PlanningSnapshot;
   nameOverride?: string;
   change?: string;
+  update?: boolean;
   committed: boolean;
   startedAt: number;
 }
@@ -155,22 +157,30 @@ export function parsePlan(input: string): ParsedPlan {
   const tokens = splitArguments(input);
   let name: string | undefined;
   let change: string | undefined;
+  let update = false;
   let debug = false;
   const requestParts: string[] = [];
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (token === "--debug" || token === "-d") debug = true;
+    else if (token === "--update") update = true;
     else if (token.startsWith("--name=")) name = token.slice("--name=".length);
     else if (token === "--name") name = tokens[++index];
     else if (token.startsWith("--change=")) change = token.slice("--change=".length);
     else if (token === "--change") change = tokens[++index];
     else requestParts.push(token);
   }
+  // allow the leading "update" keyword form: /dc-plan update --change=<slug> <request>
+  if (change && requestParts[0] === "update") {
+    update = true;
+    requestParts.shift();
+  }
   const request = requestParts.join(" ").trim();
-  if (!request) throw new Error("Usage: /dc-plan <request> [--name=slug] [--change=slug] [--debug]");
+  if (!request) throw new Error("Usage: /dc-plan <request> [--name=slug] [--change=slug] [--update] [--debug]");
   if (name !== undefined && !name.trim()) throw new Error("--name requires a non-empty slug");
   if (change !== undefined && !change.trim()) throw new Error("--change requires a non-empty slug");
-  return { request, name: name?.trim(), change: change?.trim(), debug };
+  if (update && !change) throw new Error("--update requires --change=<slug>");
+  return { request, name: name?.trim(), change: change?.trim(), update, debug };
 }
 
 function messageText(message: unknown): string {
@@ -330,7 +340,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             if (transaction.change) await validateGeneratedTasks(content);
             else await validateGeneratedPlan(content);
             const filePath = transaction.change
-              ? await writeChangeTasks(paths, normalizePlanSlug(transaction.change), content)
+              ? await writeChangeTasks(paths, normalizePlanSlug(transaction.change), content, Boolean(transaction.update))
               : await writePlanNonDestructively(paths, plan.spec.slug, content);
             transaction.committed = true;
             setPlanCommitActive(false);
@@ -879,10 +889,10 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         "it writes the viewer under .pi/deepclause/diagrams/ and opens it.",
         "Commands:",
         "  /dc-list",
-        "  /dc-plan <request> [--name=slug] [--change=slug]   create a plan or a change plan",
+        "  /dc-plan <request> [--change=slug] [--update] [--name=slug]   create or regenerate a plan",
         "  /dc-check <change|spec>            validate specs and deltas deterministically",
         "  /dc-archive <change>              merge a change delta into specs/ and archive it",
-        "  /dc-apply <change>                execute a change's tasks.dml with verification",
+        "  /dc-apply <change> [--abort]       execute tasks.dml; --abort discards an interrupted apply",
         "  /dc-run <skill|path> [args] [--context=turn|branch|isolated]",
         "  /dc-run <skill|path> --verbose   show lifecycle events",
         "  /dc-run <skill|path> --debug     show full event payloads and SDK diagnostics",
@@ -904,6 +914,16 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         const parsed = parsePlan(rawArgs);
         if (!ctx.model) throw new Error("Select a pi model before creating a plan");
         const paths = await initializeWorkspace(ctx.cwd);
+        if (parsed.change && !parsed.update) {
+          const changeSlug = normalizePlanSlug(parsed.change);
+          try {
+            await access(path.join(paths.changes, changeSlug, "tasks.dml"));
+            ctx.ui.notify(`changes/${changeSlug}/tasks.dml already exists. Re-run with --update to regenerate it, or edit tasks.dml directly.`, "error");
+            return;
+          } catch {
+            // no existing plan: proceed
+          }
+        }
         const promptOptions = ctx.getSystemPromptOptions();
         const snapshot: PlanningSnapshot = {
           model: `${ctx.model.provider}/${ctx.model.id}`,
@@ -919,17 +939,20 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
           snapshot,
           nameOverride: parsed.name,
           change: parsed.change,
+          update: parsed.update,
           committed: false,
           startedAt: Date.now(),
         };
         setPlanCommitActive(true);
         ctx.ui.notify(
           parsed.change
-            ? `Starting a change planning turn for '${parsed.change}'. Review the delta and plan before it is written.`
+            ? parsed.update
+              ? `Regenerating the change plan for '${parsed.change}'. Existing artifacts are read first and tasks.dml statuses reset to pending.`
+              : `Starting a change planning turn for '${parsed.change}'. Review the delta and plan before it is written.`
             : "Starting a contextual pi planning turn. Review the generated plan before it is written.",
           "info",
         );
-        pi.sendUserMessage(buildPlanningPrompt(parsed.request, snapshot, parsed.name, parsed.change));
+        pi.sendUserMessage(buildPlanningPrompt(parsed.request, snapshot, parsed.name, parsed.change, parsed.update));
       } catch (error) {
         planningTransaction = undefined;
         setPlanCommitActive(false);
@@ -1062,14 +1085,28 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         ctx.ui.notify("DeepClause or pi is already active; wait before running /dc-apply", "warning");
         return;
       }
-      const change = rawArgs.trim();
+      const tokens = splitArguments(rawArgs);
+      const abort = tokens.includes("--abort");
+      const change = tokens.filter((token) => token !== "--abort").join(" ").trim();
       if (!change) {
-        ctx.ui.notify("Usage: /dc-apply <change>", "warning");
+        ctx.ui.notify("Usage: /dc-apply <change> [--abort]", "warning");
         return;
       }
       try {
         const paths = await initializeWorkspace(ctx.cwd);
         const changeJson = path.join(paths.changes, change, "change.json");
+
+        if (abort) {
+          const restored = await gitRestore(pi, ctx.cwd, changeJson).catch(() => null);
+          const message = restored
+            ? `Discarded the apply and restored the working tree to ${restored}.`
+            : "No recorded apply snapshot to discard.";
+          publishResult(pi, message, { skill: "spec_apply", change, aborted: Boolean(restored) });
+          ctx.ui.notify(message, restored ? "warning" : "info");
+          return;
+        }
+
+        let started = false;
         let succeeded = false;
         try {
           const plan = await runSpecSkill(ctx, "spec_apply", [change, "plan"]);
@@ -1079,6 +1116,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             ctx.ui.notify("Apply cancelled", "warning");
             return;
           }
+          started = true;
           const answer = await runSpecSkill(ctx, "spec_apply", [change, "apply"], { verifyCommands: commands, piAgentStep: true, changeJsonPath: changeJson });
           succeeded = answer.includes("status: OK");
           publishResult(pi, answer, { skill: "spec_apply", change });
@@ -1087,9 +1125,11 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             succeeded ? "info" : "warning",
           );
         } finally {
-          if (!succeeded) {
-            const restored = await gitRestore(pi, ctx.cwd, changeJson).catch(() => null);
-            if (restored) ctx.ui.notify(`Restored the working tree to ${restored}`, "warning");
+          if (started && !succeeded) {
+            ctx.ui.notify(
+              `Apply interrupted; the working tree and task statuses were preserved. Resume with /dc-apply ${change}, or discard with /dc-apply ${change} --abort.`,
+              "warning",
+            );
           }
         }
       } catch (error) {

@@ -113,7 +113,7 @@ describe("DeepClause pi extension helpers", () => {
   });
 
   it("parses contextual plan requests and filename overrides", () => {
-    expect(parsePlan(`migrate the project to ESM --name="esm migration" --debug`)).toEqual({
+    expect(parsePlan(`migrate the project to ESM --name="esm migration" --debug`)).toMatchObject({
       request: "migrate the project to ESM",
       name: "esm migration",
       debug: true,

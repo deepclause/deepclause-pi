@@ -219,16 +219,20 @@ export function assembleTasksDml(plan: ValidatedPlan, snapshot: PlanningSnapshot
   return `${metadata}\n\n${taskBlocks.join("\n\n")}\n\n% --- execution state (managed by apply.dml; do not edit by hand) ---\n${statusLines.join("\n")}\n`;
 }
 
-/** Write changes/<slug>/tasks.dml, refusing to clobber an existing plan. */
-export async function writeChangeTasks(paths: DeepClausePaths, slug: string, text: string): Promise<string> {
+/** Write changes/<slug>/tasks.dml, refusing to clobber an existing plan unless overwrite=true. */
+export async function writeChangeTasks(paths: DeepClausePaths, slug: string, text: string, overwrite = false): Promise<string> {
   const dir = path.join(paths.changes, slug);
   await mkdir(dir, { recursive: true });
   const filePath = path.join(dir, "tasks.dml");
+  if (overwrite) {
+    await writeFile(filePath, text, { encoding: "utf8" });
+    return filePath;
+  }
   try {
     await writeFile(filePath, text, { encoding: "utf8", flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error(`changes/${slug}/tasks.dml already exists; update it with /dc-plan update instead`);
+      throw new Error(`changes/${slug}/tasks.dml already exists; re-run with --update to regenerate it`);
     }
     throw error;
   }
@@ -332,7 +336,7 @@ export async function readPlanRequiredTools(filePath: string): Promise<string[]>
   return [...new Set(match[1]!.split(",").map((name) => name.trim()).filter(Boolean))];
 }
 
-export function buildPlanningPrompt(request: string, snapshot: PlanningSnapshot, nameOverride?: string, change?: string): string {
+export function buildPlanningPrompt(request: string, snapshot: PlanningSnapshot, nameOverride?: string, change?: string, update = false): string {
   const tools = snapshot.allTools.map((tool) => ({
     name: tool.name,
     active: snapshot.activeTools.includes(tool.name),
@@ -343,13 +347,20 @@ export function buildPlanningPrompt(request: string, snapshot: PlanningSnapshot,
   }));
   const changeInstructions = change
     ? [
-        `This plan is for the change '${change}'. Before committing, create .pi/deepclause/changes/${change}/ with normal file tools:`,
-        "- proposal.md — why / what / capabilities / impact.",
-        "- specs/<capability>.spec.md — delta(s) using ## ADDED|MODIFIED|REMOVED Requirements.",
-        "- design.md — optional approach and trade-offs.",
+        update
+          ? `This regenerates the change '${change}'. Read the existing .pi/deepclause/changes/${change}/proposal.md, specs/**, design.md and tasks.dml first, then revise them as needed.`
+          : `This plan is for the change '${change}'. Before committing, create .pi/deepclause/changes/${change}/ with normal file tools:`,
+        ...(update
+          ? []
+          : [
+              "- proposal.md — why / what / capabilities / impact.",
+              "- specs/<capability>.spec.md — delta(s) using ## ADDED|MODIFIED|REMOVED Requirements.",
+              "- design.md — optional approach and trade-offs.",
+            ]),
         "Specs describe behaviour only: no commands, file paths, library choices or implementation steps.",
         "Use exactly three hashes for ### Requirement and four for #### Scenario; every requirement needs at least one scenario.",
         "Each committed step must list the scenario ids it satisfies (capability#scenario-slug) and at least one check encoded as cmd:<command>, exists:<path> or model:<question>.",
+        "The committed tasks.dml replaces any previous one; every plan_task_status entry resets to pending.",
       ]
     : [];
   return [

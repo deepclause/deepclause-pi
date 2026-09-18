@@ -470,3 +470,46 @@ describe("task coverage and scaffold", () => {
     expect(scaffold.answer).toContain('satisfies: ["ui/theme#invalid-stored-value-is-rejected"]');
   });
 });
+
+const BAD_TARGET_DELTA = `---
+change: c
+---
+
+# Spec Delta
+
+## MODIFIED Requirements
+
+### Requirement: Nonexistent
+The app SHALL do something that is not in the spec.
+
+#### Scenario: Missing
+- **WHEN** a
+- **THEN** b
+`;
+
+describe("merge guard", () => {
+  it("refuses MODIFIED/REMOVED that do not exist in the target spec", async () => {
+    const cwd = await workspace({
+      ".pi/deepclause/specs/ui/theme.spec.md": BASE_SPEC,
+      ".pi/deepclause/changes/c/specs/ui/theme.spec.md": BAD_TARGET_DELTA,
+    });
+    const specPath = path.join(cwd, ".pi", "deepclause", "specs", "ui", "theme.spec.md");
+
+    const plan = await runLibrary(cwd, `sp_archive("c", plan, R), answer(R)`);
+    expect(plan.errors).toEqual([]);
+    expect(plan.answer).toContain("MODIFIED/REMOVED requirements not found in the target spec: Nonexistent");
+
+    const apply = await runLibrary(cwd, `sp_archive("c", apply, R), answer(R)`);
+    expect(apply.answer).toContain("MODIFIED/REMOVED requirements not found");
+    // nothing was written
+    expect(await readFile(specPath, "utf8")).toBe(BASE_SPEC);
+  });
+
+  it("refuses MODIFIED for a brand-new capability", async () => {
+    const cwd = await workspace({
+      ".pi/deepclause/changes/newbie/specs/ui/newbie.spec.md": BAD_TARGET_DELTA,
+    });
+    const plan = await runLibrary(cwd, `sp_archive("newbie", plan, R), answer(R)`);
+    expect(plan.answer).toContain("only ## ADDED Requirements is allowed for a new capability");
+  });
+});

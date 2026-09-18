@@ -33,6 +33,15 @@ then applies with `pi_agent_step` and `dc_verify_run` enabled.
 
 Not yet implemented: the `deltas.dml` / `index.dml` files, and `RENAMED` support in merge.
 
+Implemented in phase 7: resumable apply and a merge guard. `/dc-plan --change` fails
+before spending a planning turn when `tasks.dml` already exists; `--update` (or a
+leading `update` keyword) regenerates it and resets statuses to pending. Merging now
+refuses `MODIFIED`/`REMOVED` entries that do not exist in the target spec, and refuses
+`MODIFIED`/`REMOVED` for a brand-new capability, instead of silently dropping them.
+`/dc-apply` **preserves** an interrupted apply (working tree plus `done`/`failed`
+statuses, `applyState: in_progress` in `change.json`) so a re-run resumes from the
+remaining tasks; `/dc-apply --abort` discards it and restores the snapshot.
+
 Implemented in phase 6: apply-time rollback. `dc_apply_snapshot` records a git ref
 (refusing a dirty tree) in `change.json`; `dc_apply_accept` clears it on success; the
 `/dc-apply` harness restores on any run that does not report `status: OK`, including
