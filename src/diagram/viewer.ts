@@ -108,6 +108,17 @@ export async function buildViewer(options: BuildViewerOptions): Promise<ViewerBu
   return { viewerPath, diagramsDir: diagrams, entries };
 }
 
+export async function buildEntriesViewer(options: {
+  cwd: string;
+  templateText: string;
+  vendorAssetPath: string;
+  entries: DiagramEntry[];
+}): Promise<ViewerBuildResult> {
+  const { diagrams, vendorFile } = await ensureDiagramDir(options.cwd, options.vendorAssetPath);
+  const viewerPath = await renderViewer(diagrams, options.entries, options.templateText, vendorFile);
+  return { viewerPath, diagramsDir: diagrams, entries: options.entries };
+}
+
 export async function writeSidecar(diagramsDir: string, name: string, grade: DiagramGrade, code: string): Promise<string> {
   const file = path.join(diagramsDir, `${name}.${grade}.mmd`);
   await writeFile(file, code.endsWith("\n") ? code : `${code}\n`, "utf8");

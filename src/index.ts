@@ -11,9 +11,11 @@ import { renderDml, renderSequence } from "./diagram/extract.js";
 import { polishDiagram, resolveGrade, type DiagramGrade } from "./diagram/grade.js";
 import { findChrome, validateMermaid, type MermaidView } from "./diagram/validate.js";
 import {
+  buildEntriesViewer,
   buildViewer,
   openViewerInBrowser,
   writeSidecar,
+  type DiagramEntry,
 } from "./diagram/viewer.js";
 import {
   collectDiagramTargets,
@@ -40,7 +42,8 @@ import {
 
 const DC_RUN_TOOL = "dc_run";
 const DC_DIAGRAM_TOOL = "dc_diagram";
-const AUTHORING_INSTRUCTION = `DeepClause programs live in .pi/deepclause/skills/ and executable generated plans live in .pi/deepclause/plans/. You may create and edit DML skills directly after consulting .pi/deepclause/AGENTS.md and DML_REFERENCE.md. Use /dc-plan when the user asks pi to design a contextual executable plan; finish that planning turn with dc_plan_commit. When the user asks for a diagram, flowchart, or visual of a .dml file, call the dc_diagram tool with the exact path and the requested grade (presentation or specification); it writes the viewer under .pi/deepclause/diagrams/ and opens it, so do not hand-write Mermaid. DeepClause compilation is unavailable, so generated content must already be valid DML. Users execute programs through /dc-run. If the opt-in dc_run tool is active, you may execute an ordinary skill with it, but contextual plans requiring pi_agent_step must be started by the user. Never invoke a compiler or create .deepclause/.`;
+const DC_SPEC_GRAPH_TOOL = "dc_spec_graph";
+const AUTHORING_INSTRUCTION = `DeepClause programs live in .pi/deepclause/skills/ and executable generated plans live in .pi/deepclause/plans/. You may create and edit DML skills directly after consulting .pi/deepclause/AGENTS.md and DML_REFERENCE.md. Use /dc-plan when the user asks pi to design a contextual executable plan; finish that planning turn with dc_plan_commit. When the user asks for a diagram, flowchart, or visual of a .dml file, call the dc_diagram tool with the exact path and the requested grade (presentation or specification); it writes the viewer under .pi/deepclause/diagrams/ and opens it, so do not hand-write Mermaid. DeepClause compilation is unavailable, so generated content must already be valid DML. Users execute programs through /dc-run. If the opt-in dc_run tool is active, you may execute an ordinary skill with it, but contextual plans requiring pi_agent_step must be started by the user. Never invoke a compiler or create .deepclause/. Capability specs live in .pi/deepclause/specs/ and change deltas in .pi/deepclause/changes/<slug>/specs/; validate them deterministically with /dc-check, and call dc_spec_graph when the user wants a graph of capabilities, requirements, scenarios or changes.`;
 const STATUS_KEY = "deepclause";
 const WIDGET_KEY = "deepclause-stream";
 
@@ -232,6 +235,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
   let activeDescription: string | undefined;
   let modelToolRegistered = false;
   let diagramToolRegistered = false;
+  let specGraphToolRegistered = false;
   let planCommitRegistered = false;
   let planningTransaction: PlanningTransaction | undefined;
   let pendingAgentStep: PendingAgentStep | undefined;
@@ -659,10 +663,95 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
     }
   };
 
+  const setSpecGraphActive = () => {
+    if (!specGraphToolRegistered) {
+      pi.registerTool({
+        name: DC_SPEC_GRAPH_TOOL,
+        label: "Spec Graph",
+        description: "Create a Mermaid graph of DeepClause capabilities, requirements, scenarios and changes, write a viewer under .pi/deepclause/diagrams/, and open it.",
+        promptSnippet: "Create a capability/change graph from DeepClause spec facts",
+        promptGuidelines: [
+          "Call dc_spec_graph when the user asks for a graph or visual of capabilities, requirements, changes, or spec coverage.",
+        ],
+        parameters: Type.Object({
+          view: Type.Optional(StringEnum(["capabilities", "changes"] as const)),
+        }),
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          try {
+            const view = params.view ?? "capabilities";
+            const mermaid = await runSpecSkill(ctx, "spec_graph", [view]);
+            const name = `spec-${view}`;
+            const entry: DiagramEntry = {
+              name,
+              path: `specs (${view})`,
+              flow: mermaid,
+              seq: "",
+              dml: "",
+              presentation: mermaid,
+              specification: null,
+            };
+            const build = await buildEntriesViewer({
+              cwd: ctx.cwd,
+              templateText: await bundledViewerTemplate(),
+              vendorAssetPath: viewerVendorAssetPath(),
+              entries: [entry],
+            });
+            const opened = ctx.hasUI
+              ? await openViewerInBrowser(pi, build.viewerPath, name, "presentation")
+              : false;
+            const viewer = displayPath(ctx.cwd, build.viewerPath);
+            return {
+              content: [{ type: "text", text: `Created spec graph (${view}). Viewer: ${viewer}${opened ? " (opened in your browser)" : ""}` }],
+              details: { success: true, view, viewer, opened },
+            };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { content: [{ type: "text", text: `dc_spec_graph failed: ${message}` }], details: { success: false, error: message } };
+          }
+        },
+      });
+      specGraphToolRegistered = true;
+    }
+    const activeTools = pi.getActiveTools();
+    if (!activeTools.includes(DC_SPEC_GRAPH_TOOL)) {
+      pi.setActiveTools([...activeTools, DC_SPEC_GRAPH_TOOL]);
+    }
+  };
+
+  const runSpecSkill = async (ctx: ExtensionContext, skill: string, args: string[] = []): Promise<string> => {
+    const paths = await initializeWorkspace(ctx.cwd);
+    const config = await loadConfig(paths.config);
+    const filePath = await resolveDmlPath(paths, skill);
+    const controller = new AbortController();
+    activeController = controller;
+    activeDescription = `running ${skill}`;
+    try {
+      const result = await executeDml(
+        filePath,
+        args,
+        [],
+        config,
+        pi,
+        ctx,
+        controller,
+        {
+          onEvent() {},
+          onInput: async () => { throw new Error("spec skills do not request input"); },
+        },
+      );
+      if (result.errors.length) throw new Error(result.errors.join("\n"));
+      return result.answer ?? "(no answer)";
+    } finally {
+      activeController = undefined;
+      activeDescription = undefined;
+    }
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     const config = await loadConfig(getPaths(ctx.cwd).config);
     setModelToolActive(config.modelToolEnabled);
     setDiagramToolActive();
+    setSpecGraphActive();
   });
 
   pi.on("tool_execution_start", (event) => {
@@ -749,6 +838,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         "Commands:",
         "  /dc-list",
         "  /dc-plan <request> [--name=slug]   create an executable contextual DML plan",
+        "  /dc-check <change|spec>            validate specs and deltas deterministically",
         "  /dc-run <skill|path> [args] [--context=turn|branch|isolated]",
         "  /dc-run <skill|path> --verbose   show lifecycle events",
         "  /dc-run <skill|path> --debug     show full event payloads and SDK diagnostics",
@@ -851,6 +941,25 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
       }
       activeController.abort(new Error("Cancelled by user"));
       ctx.ui.notify("Cancelling DeepClause execution", "warning");
+    },
+  });
+
+  pi.registerCommand("dc-check", {
+    description: "Validate DeepClause specs and change deltas deterministically (no model calls)",
+    handler: async (_rawArgs, ctx) => {
+      if (activeController || !ctx.isIdle()) {
+        ctx.ui.notify("DeepClause or pi is already active; wait before running /dc-check", "warning");
+        return;
+      }
+      try {
+        const answer = await runSpecSkill(ctx, "spec_validate");
+        publishResult(pi, answer, { skill: "spec_validate" });
+        ctx.ui.notify(answer.startsWith("spec check: OK") ? "Spec check passed" : "Spec check reported errors", answer.startsWith("spec check: OK") ? "info" : "warning");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        publishResult(pi, `Spec check failed: ${message}`, { error: message });
+        ctx.ui.notify(message, "error");
+      }
     },
   });
 

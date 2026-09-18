@@ -1,0 +1,478 @@
+%%% specs.dml — deterministic DML spec engine (phase 1).
+%%%
+%%% Parses DeepClause/OpenSpec-style Markdown specs and deltas, validates their
+%%% structure, and produces reports, status, queries and Mermaid graphs.
+%%%
+%%% Pure Prolog: never calls the model (no task/1, no prompt/1) and never
+%%% executes a runtime tool. Skills consult it and supply agent_main.
+%%%
+%%% Layout it understands:
+%%%   .pi/deepclause/specs/**/*.md                 capability specs (source of truth)
+%%%   .pi/deepclause/changes/<slug>/specs/**/*.md  change deltas
+
+%% ---------------------------------------------------------------------------
+%% Line and heading utilities
+%% ---------------------------------------------------------------------------
+
+sp_count_hashes(S, Acc, N) :-
+    (   sub_string(S, 0, 1, _, "#")
+    ->  sub_string(S, 1, _, 0, S1),
+        Acc1 is Acc + 1,
+        sp_count_hashes(S1, Acc1, N)
+    ;   N = Acc
+    ).
+
+%% sp_heading(+Line, -Level, -Text). Level is 0 for a non-heading line.
+sp_heading(Line, Level, Text) :-
+    sp_count_hashes(Line, 0, C),
+    (   C > 0,
+        sub_string(Line, C, _, 0, Rest),
+        sub_string(Rest, 0, 1, _, " ")
+    ->  Level = C,
+        sub_string(Rest, 1, _, 0, Raw),
+        normalize_space(string(Text), Raw)
+    ;   Level = 0,
+        Text = ""
+    ).
+
+sp_number([], _, []).
+sp_number([Line|Lines], N, [line(Line, N)|Out]) :-
+    N1 is N + 1,
+    sp_number(Lines, N1, Out).
+
+sp_lines(Text, Numbered) :-
+    split_string(Text, "\n", "", Raw),
+    sp_number(Raw, 1, Numbered).
+
+sp_trimmed(List, Out) :-
+    findall(Text, (
+        member(line(Line, _), List),
+        normalize_space(string(Text), Line),
+        Text \= ""
+    ), Out).
+
+%% Join non-blank body lines with spaces, for prose (purpose, description).
+sp_prose(List, Text) :-
+    sp_trimmed(List, Parts),
+    atomics_to_string(Parts, " ", Text).
+
+%% ---------------------------------------------------------------------------
+%% Section splitting: stops at heading levels 1-3; level 4+ stays in the body.
+%% ---------------------------------------------------------------------------
+
+sp_sections(Lines, Sections) :-
+    sp_skip_plain(Lines, Rest),
+    sp_sections_from(Rest, Sections).
+
+sp_skip_plain([line(Line, Number)|Rest], [line(Line, Number)|Rest]) :- sp_heading(Line, Level, _), Level >= 1, Level =< 3, !.
+sp_skip_plain([_|Rest], Out) :- sp_skip_plain(Rest, Out).
+sp_skip_plain([], []).
+
+sp_sections_from([], []).
+sp_sections_from([line(Line, N)|Rest], [section(Level, Text, N, Body)|More]) :-
+    sp_heading(Line, Level, Text),
+    Level >= 1,
+    Level =< 3,
+    sp_take_body(Rest, Body, Tail),
+    sp_sections_from(Tail, More).
+
+sp_take_body([], [], []).
+sp_take_body([line(Line, Number)|Rest], [], [line(Line, Number)|Rest]) :-
+    sp_heading(Line, Level, _),
+    Level >= 1,
+    Level =< 3,
+    !.
+sp_take_body([Item|Rest], [Item|Body], Tail) :- sp_take_body(Rest, Body, Tail).
+
+%% Split a requirement body (level-4 headings inline) into description + scenarios.
+sp_split_scenarios(Body, DescLines, ScenarioSections) :-
+    sp_take_plain(Body, DescLines, Rest),
+    sp_scenario_sections(Rest, ScenarioSections).
+
+sp_take_plain([], [], []).
+sp_take_plain([line(Line, Number)|Rest], [], [line(Line, Number)|Rest]) :-
+    sp_heading(Line, Level, _),
+    Level >= 4,
+    !.
+sp_take_plain([Item|Rest], [Item|Body], Tail) :- sp_take_plain(Rest, Body, Tail).
+
+sp_scenario_sections([], []).
+sp_scenario_sections([line(Line, N)|Rest], [section(4, Text, N, Body)|More]) :-
+    sp_heading(Line, 4, Text),
+    sp_take_until_level4(Rest, Body, Tail),
+    sp_scenario_sections(Tail, More).
+
+sp_take_until_level4([], [], []).
+sp_take_until_level4([line(Line, Number)|Rest], [], [line(Line, Number)|Rest]) :-
+    sp_heading(Line, Level, _),
+    Level >= 4,
+    !.
+sp_take_until_level4([Item|Rest], [Item|Body], Tail) :- sp_take_until_level4(Rest, Body, Tail).
+
+%% ---------------------------------------------------------------------------
+%% Term extraction
+%% ---------------------------------------------------------------------------
+
+sp_requirement_name(Text, Name) :-
+    string_concat("Requirement:", Rest, Text),
+    normalize_space(string(Name), Rest),
+    Name \= "".
+
+sp_scenario_name(Text, Name) :-
+    string_concat("Scenario:", Rest, Text),
+    normalize_space(string(Name), Rest),
+    Name \= "".
+
+sp_requirement_body(Body, Desc, Scenarios) :-
+    sp_split_scenarios(Body, DescLines, ScenarioSections),
+    sp_prose(DescLines, Desc),
+    findall(scenario(Name, N, Steps), (
+        member(section(4, Text, N, SBody), ScenarioSections),
+        sp_scenario_name(Text, Name),
+        sp_trimmed(SBody, Steps)
+    ), Scenarios).
+
+%% spec(Title, Purpose, [req(Name, Line, Description, Scenarios)])
+sp_parse_spec(Text, spec(Title, Purpose, Requirements)) :-
+    sp_lines(Text, Lines),
+    sp_sections(Lines, Sections),
+    (   member(section(1, T, _, _), Sections)
+    ->  Title = T
+    ;   Title = ""
+    ),
+    (   member(section(2, "Purpose", _, PurposeBody), Sections)
+    ->  sp_prose(PurposeBody, Purpose)
+    ;   Purpose = ""
+    ),
+    findall(req(Name, N, Desc, Scenarios), (
+        member(section(3, Heading, N, Body), Sections),
+        sp_requirement_name(Heading, Name),
+        sp_requirement_body(Body, Desc, Scenarios)
+    ), Requirements).
+
+%% Delta op section headers.
+sp_delta_header("ADDED Requirements", added).
+sp_delta_header("MODIFIED Requirements", modified).
+sp_delta_header("REMOVED Requirements", removed).
+sp_delta_header("RENAMED Requirements", renamed).
+
+%% [delta(Op, [req(Name, Line, Description, Scenarios)])]
+sp_parse_delta(Text, Deltas) :-
+    sp_lines(Text, Lines),
+    sp_sections(Lines, Sections),
+    sp_drop_to_op(Sections, Rest),
+    sp_collect_ops(Rest, Deltas).
+
+sp_drop_to_op([], []).
+sp_drop_to_op([section(2, Header, Number, Body)|Rest], [section(2, Header, Number, Body)|Rest]) :-
+    sp_delta_header(Header, _),
+    !.
+sp_drop_to_op([_|Rest], Out) :- sp_drop_to_op(Rest, Out).
+
+sp_collect_ops([], []).
+sp_collect_ops([section(2, Header, _, _)|Rest], Deltas) :-
+    (   sp_delta_header(Header, Op)
+    ->  sp_take_until_op(Rest, Group, Tail),
+        findall(req(Name, N, Desc, Scenarios), (
+            member(section(3, Heading, N, Body), Group),
+            sp_requirement_name(Heading, Name),
+            sp_requirement_body(Body, Desc, Scenarios)
+        ), Reqs),
+        Deltas = [delta(Op, Reqs)|More],
+        sp_collect_ops(Tail, More)
+    ;   sp_collect_ops(Rest, Deltas)
+    ).
+
+sp_take_until_op([], [], []).
+sp_take_until_op([section(2, Header, Number, Body)|Rest], [], [section(2, Header, Number, Body)|Rest]) :-
+    sp_delta_header(Header, _),
+    !.
+sp_take_until_op([Item|Rest], [Item|Group], Tail) :- sp_take_until_op(Rest, Group, Tail).
+
+%% ---------------------------------------------------------------------------
+%% Validation
+%% ---------------------------------------------------------------------------
+
+%% 3-hash Scenario and 4-hash Requirement are the classic silent failures.
+sp_heading_errors(File, Lines, Errors) :-
+    findall(error(File, N, Message), (
+        member(line(Line, N), Lines),
+        sp_heading(Line, Level, Text),
+        Level > 0,
+        sp_heading_error(Level, Text, Message)
+    ), Errors).
+
+sp_heading_error(3, Text, "scenario heading must use #### (4 hashes), not ###") :-
+    string_concat("Scenario", _, Text),
+    !.
+sp_heading_error(4, Text, "requirement heading must use ### (3 hashes), not ####") :-
+    string_concat("Requirement", _, Text),
+    !.
+
+sp_requirement_errors(File, Requirements, Errors) :-
+    findall(error(File, N, Message), (
+        member(req(Name, N, _, Scenarios), Requirements),
+        Scenarios == [],
+        format(string(Message), "requirement '~w' has no scenario", [Name])
+    ), Errors).
+
+sp_duplicate_errors(File, Requirements, Errors) :-
+    findall(error(File, N, Message), (
+        member(req(Name, N, _, _), Requirements),
+        member(req(Name, Earlier, _, _), Requirements),
+        Earlier < N,
+        format(string(Message), "duplicate requirement '~w' (first at line ~w)", [Name, Earlier])
+    ), Errors).
+
+sp_delta_errors(File, Deltas, Errors) :-
+    findall(error(File, N, Message), (
+        member(delta(Op, Requirements), Deltas),
+        ( Op == added ; Op == modified ),
+        member(req(Name, N, _, Scenarios), Requirements),
+        Scenarios == [],
+        format(string(Message), "~w requirement '~w' has no scenario", [Op, Name])
+    ), Errors).
+
+sp_validate_spec(File, Text, Errors) :-
+    sp_lines(Text, Lines),
+    sp_parse_spec(Text, spec(_, _, Requirements)),
+    sp_heading_errors(File, Lines, E1),
+    sp_requirement_errors(File, Requirements, E2),
+    sp_duplicate_errors(File, Requirements, E3),
+    append(E1, E2, A),
+    append(A, E3, Errors).
+
+sp_validate_delta(File, Text, Errors) :-
+    sp_lines(Text, Lines),
+    sp_parse_delta(Text, Deltas),
+    sp_heading_errors(File, Lines, E1),
+    sp_delta_errors(File, Deltas, E2),
+    append(E1, E2, Errors).
+
+%% ---------------------------------------------------------------------------
+%% File discovery (missing directories simply yield no files)
+%% ---------------------------------------------------------------------------
+
+sp_walk(Dir, Exts, Files) :-
+    (   exists_directory(Dir)
+    ->  directory_files(Dir, Names),
+        sp_walk_names(Names, Dir, Exts, Files)
+    ;   Files = []
+    ).
+
+sp_walk_names([], _, _, []).
+sp_walk_names([Name|Rest], Dir, Exts, Files) :-
+    Name \= ".",
+    Name \= "..",
+    atomic_list_concat([Dir, "/", Name], Path),
+    (   exists_directory(Path)
+    ->  sp_walk(Path, Exts, Sub)
+    ;   (   file_name_extension(_, Ext, Path),
+            memberchk(Ext, Exts)
+        ->  Sub = [Path]
+        ;   Sub = []
+        )
+    ),
+    sp_walk_names(Rest, Dir, Exts, More),
+    append(Sub, More, Files).
+
+sp_spec_files(Files) :-
+    sp_walk(".pi/deepclause/specs", [md], Files).
+
+sp_change_dirs(Dirs) :-
+    (   exists_directory(".pi/deepclause/changes")
+    ->  directory_files(".pi/deepclause/changes", Names),
+        findall(Path, (
+            member(Name, Names),
+            Name \= ".",
+            Name \= "..",
+            Name \= "archive",
+            atomic_list_concat([".pi/deepclause/changes/", Name], Path),
+            exists_directory(Path)
+        ), Dirs)
+    ;   Dirs = []
+    ).
+
+sp_change_delta_files(Change, Files) :-
+    atomic_list_concat([Change, "/specs"], Dir),
+    sp_walk(Dir, [md], Files).
+
+sp_all_delta_files(Dirs, Files) :-
+    findall(All, (member(D, Dirs), sp_change_delta_files(D, All)), Nested),
+    append(Nested, Files).
+
+%% Capability id from a spec path: specs/ui/theme.spec.md -> ui/theme
+sp_capability_id(File, Id) :-
+    (   sub_string(File, Before, _, _, "/specs/")
+    ->  After is Before + 7,
+        sub_string(File, After, _, 0, Rest),
+        (   string_concat(Id, ".spec.md", Rest)
+        ->  true
+        ;   string_concat(Id, ".md", Rest)
+        ->  true
+        ;   Id = Rest
+        )
+    ;   sp_short_id(File, Id)
+    ).
+
+%% Capability id from a single-file path: ui/theme.spec.md -> ui/theme
+sp_short_id(File, Id) :-
+    file_base_name(File, Base),
+    (   file_name_extension(Stem, md, Base)
+    ->  atom_string(StemText, Stem),
+        (   string_concat(Id, ".spec", StemText)
+        ->  true
+        ;   Id = StemText
+        )
+    ;   Id = Base
+    ).
+
+%% ---------------------------------------------------------------------------
+%% Reports
+%% ---------------------------------------------------------------------------
+
+sp_read_check_spec(File, Summary, Errors) :-
+    read_file_to_string(File, Text, []),
+    sp_capability_id(File, Id),
+    sp_parse_spec(Text, spec(Title, _, Reqs)),
+    length(Reqs, ReqCount),
+    findall(S, (member(req(_, _, _, Ss), Reqs), member(S, Ss)), Scenarios),
+    length(Scenarios, ScenarioCount),
+    format(string(Summary), "spec ~w: ~w requirements, ~w scenarios", [Id, ReqCount, ScenarioCount]),
+    sp_validate_spec(File, Text, Errors).
+
+sp_read_check_delta(File, Summary, Errors) :-
+    read_file_to_string(File, Text, []),
+    sp_parse_delta(Text, Deltas),
+    findall(op(Op, Reqs), member(delta(Op, Reqs), Deltas), Ops),
+    findall(S, (member(op(_, Reqs), Ops), member(req(_, _, _, Ss), Reqs), member(S, Ss)), Scenarios),
+    length(Scenarios, ScenarioCount),
+    format(string(Summary), "delta ~w: ~w operation sections, ~w scenarios", [File, Ops, ScenarioCount]),
+    sp_validate_delta(File, Text, Errors).
+
+sp_error_line(error(File, Line, Message), Rendered) :-
+    format(string(Rendered), "  ~w:~w  ~w", [File, Line, Message]).
+
+sp_check_all(Report) :-
+    sp_spec_files(SpecFiles),
+    sp_change_dirs(ChangeDirs),
+    sp_all_delta_files(ChangeDirs, DeltaFiles),
+    findall(Summary, (member(F, SpecFiles), sp_read_check_spec(F, Summary, _)), SpecSummaries),
+    findall(Summary, (member(F, DeltaFiles), sp_read_check_delta(F, Summary, _)), DeltaSummaries),
+    findall(E, (member(F, SpecFiles), sp_read_check_spec(F, _, Es), member(E, Es)), SpecErrors),
+    findall(E, (member(F, DeltaFiles), sp_read_check_delta(F, _, Es), member(E, Es)), DeltaErrors),
+    append(SpecErrors, DeltaErrors, Errors),
+    length(Errors, ErrorCount),
+    (   ErrorCount =:= 0 -> Status = "OK" ; Status = "FAILED" ),
+    length(SpecFiles, CapCount),
+    length(DeltaFiles, DeltaCount),
+    findall(EL, (member(E, Errors), sp_error_line(E, EL)), ErrorLines),
+    (   ErrorLines == [] -> ErrorBlock = ["  no structural errors"] ; ErrorBlock = ErrorLines ),
+    format(string(Header), "spec check: ~w  (~w capabilities, ~w deltas, ~w errors)", [Status, CapCount, DeltaCount, ErrorCount]),
+    append([Header], SpecSummaries, L1),
+    append(L1, DeltaSummaries, L2),
+    append(L2, [""], L3),
+    append(L3, ErrorBlock, Body),
+    atomics_to_string(Body, "\n", Report).
+
+sp_status(Report) :-
+    sp_spec_files(SpecFiles),
+    sp_change_dirs(ChangeDirs),
+    sp_all_delta_files(ChangeDirs, DeltaFiles),
+    findall(Cap, (member(F, SpecFiles), sp_capability_id(F, Cap)), CapIds),
+    length(SpecFiles, CapCount),
+    length(DeltaFiles, DeltaCount),
+    length(ChangeDirs, ChangeCount),
+    atomics_to_string(CapIds, ", ", CapList),
+    (   CapIds == [] -> CapList = "none" ; true ),
+    format(string(CapLine), "capabilities: ~w  (~w)", [CapCount, CapList]),
+    format(string(ChangeLine), "active changes: ~w", [ChangeCount]),
+    format(string(DeltaLine), "delta files: ~w", [DeltaCount]),
+    atomics_to_string([CapLine, ChangeLine, DeltaLine], "\n", Report).
+
+sp_capability_file(Capability, File) :-
+    sp_spec_files(Files),
+    member(File, Files),
+    sp_capability_id(File, Capability).
+
+sp_query(Capability, Report) :-
+    (   sp_capability_file(Capability, File)
+    ->  read_file_to_string(File, Text, []),
+        sp_parse_spec(Text, spec(Title, Purpose, Reqs)),
+        findall(RL, (member(req(Name, _, Desc, Ss), Reqs), length(Ss, SN),
+            format(string(RL), "  ~w  (~w scenarios)  ~w", [Name, SN, Desc])), RLs),
+        format(string(Header), "capability ~w — ~w", [Capability, Title]),
+        format(string(PurposeLine), "purpose: ~w", [Purpose]),
+        (   RLs == [] -> ReqBlock = ["  (no requirements)"] ; ReqBlock = RLs ),
+        append([Header, PurposeLine, "requirements:"], ReqBlock, Body),
+        atomics_to_string(Body, "\n", Report)
+    ;   format(string(Report), "unknown capability: ~w", [Capability])
+    ).
+
+%% ---------------------------------------------------------------------------
+%% Mermaid graphs
+%% ---------------------------------------------------------------------------
+
+sp_graph_caps([], N, [], N).
+sp_graph_caps([File|Rest], N0, Lines, N) :-
+    read_file_to_string(File, Text, []),
+    sp_parse_spec(Text, spec(Title, _, Reqs)),
+    sp_capability_id(File, Cap),
+    N1 is N0 + 1,
+    format(string(CapNode), "  n~w[\"~w — ~w\"]", [N1, Cap, Title]),
+    N2 is N1 + 1,
+    sp_graph_reqs(Reqs, N1, N2, N3, ReqLines),
+    sp_graph_caps(Rest, N3, RestLines, N),
+    append([CapNode|ReqLines], RestLines, Lines).
+
+sp_graph_reqs([], _, N, N, []).
+sp_graph_reqs([req(Name, _, _, Scenarios)|Rest], Parent, N0, N, Lines) :-
+    N1 is N0 + 1,
+    format(string(NodeLine), "  n~w[\"Requirement: ~w\"]", [N1, Name]),
+    format(string(EdgeLine), "  n~w --> n~w", [Parent, N1]),
+    N2 is N1 + 1,
+    sp_graph_scenarios(Scenarios, N1, N2, N3, ScenarioLines),
+    sp_graph_reqs(Rest, Parent, N3, N, RestLines),
+    append([NodeLine, EdgeLine|ScenarioLines], RestLines, Lines).
+
+sp_graph_scenarios([], _, N, N, []).
+sp_graph_scenarios([scenario(Name, _, _)|Rest], Parent, N0, N, Lines) :-
+    N1 is N0 + 1,
+    format(string(NodeLine), "  n~w[\"Scenario: ~w\"]", [N1, Name]),
+    format(string(EdgeLine), "  n~w --> n~w", [Parent, N1]),
+    sp_graph_scenarios(Rest, Parent, N1, N, RestLines),
+    Lines = [NodeLine, EdgeLine|RestLines].
+
+sp_graph(changes, Mermaid) :-
+    sp_change_dirs(ChangeDirs),
+    sp_graph_change_nodes(ChangeDirs, 0, Lines, _),
+    (   Lines == [] -> Body = ["  empty[\"no active changes\"]"] ; Body = Lines ),
+    atomics_to_string(["flowchart LR"|Body], "\n", Mermaid).
+
+sp_graph_change_nodes([], N, [], N).
+sp_graph_change_nodes([Dir|Rest], N0, Lines, N) :-
+    file_base_name(Dir, Name),
+    N1 is N0 + 1,
+    format(string(NodeLine), "  n~w[\"~w\"]", [N1, Name]),
+    sp_change_delta_files(Dir, DeltaFiles),
+    sp_graph_delta_edges(DeltaFiles, N1, N1, N2, EdgeLines),
+    sp_graph_change_nodes(Rest, N2, RestLines, N),
+    append([NodeLine|EdgeLines], RestLines, Lines).
+
+sp_graph_delta_edges([], _, N, N, []).
+sp_graph_delta_edges([File|Rest], Parent, N0, N, Lines) :-
+    sp_capability_id(File, Cap),
+    N1 is N0 + 1,
+    format(string(NodeLine), "  n~w[\"~w\"]", [N1, Cap]),
+    format(string(EdgeLine), "  n~w -- touches --> n~w", [Parent, N1]),
+    sp_graph_delta_edges(Rest, Parent, N1, N, RestLines),
+    Lines = [NodeLine, EdgeLine|RestLines].
+
+sp_graph(capabilities, Mermaid) :-
+    sp_spec_files(Files),
+    sp_graph_caps(Files, 0, Lines, _),
+    (   Lines == [] -> Body = ["  empty[\"no specs found\"]"] ; Body = Lines ),
+    atomics_to_string(["flowchart LR"|Body], "\n", Mermaid).
+
+sp_graph(_, Mermaid) :-
+    sp_graph(capabilities, Mermaid).

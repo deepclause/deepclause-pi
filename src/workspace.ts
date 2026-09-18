@@ -7,6 +7,9 @@ export interface DeepClausePaths {
   root: string;
   skills: string;
   plans: string;
+  specs: string;
+  changes: string;
+  lib: string;
   config: string;
   agents: string;
   reference: string;
@@ -57,6 +60,9 @@ export function getPaths(cwd: string): DeepClausePaths {
     root,
     skills: path.join(root, "skills"),
     plans: path.join(root, "plans"),
+    specs: path.join(root, "specs"),
+    changes: path.join(root, "changes"),
+    lib: path.join(root, "lib"),
     config: path.join(root, "config.json"),
     agents: path.join(root, "AGENTS.md"),
     reference: path.join(root, "DML_REFERENCE.md"),
@@ -81,6 +87,10 @@ async function bundledAuthoringGuide(): Promise<string> {
   return readFile(fileURLToPath(new URL("./assets/AGENTS.md", import.meta.url)), "utf8");
 }
 
+async function bundledAsset(name: string): Promise<string> {
+  return readFile(fileURLToPath(new URL(`./assets/${name}`, import.meta.url)), "utf8");
+}
+
 async function bundledDeepResearch(): Promise<string> {
   return readFile(fileURLToPath(new URL("./assets/deep_research.dml", import.meta.url)), "utf8");
 }
@@ -90,6 +100,9 @@ export async function initializeWorkspace(cwd: string): Promise<DeepClausePaths>
   await Promise.all([
     mkdir(paths.skills, { recursive: true }),
     mkdir(paths.plans, { recursive: true }),
+    mkdir(paths.specs, { recursive: true }),
+    mkdir(paths.changes, { recursive: true }),
+    mkdir(paths.lib, { recursive: true }),
   ]);
   await Promise.all([
     writeIfMissing(paths.config, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`),
@@ -97,6 +110,11 @@ export async function initializeWorkspace(cwd: string): Promise<DeepClausePaths>
     writeIfMissing(paths.reference, await bundledReference()),
     writeIfMissing(path.join(paths.skills, "example.dml"), EXAMPLE_DML),
     writeIfMissing(path.join(paths.skills, "deep_research.dml"), await bundledDeepResearch()),
+    writeIfMissing(path.join(paths.lib, "specs.dml"), await bundledAsset("specs.dml")),
+    writeIfMissing(path.join(paths.skills, "spec_validate.dml"), await bundledAsset("spec_validate.dml")),
+    writeIfMissing(path.join(paths.skills, "spec_status.dml"), await bundledAsset("spec_status.dml")),
+    writeIfMissing(path.join(paths.skills, "spec_query.dml"), await bundledAsset("spec_query.dml")),
+    writeIfMissing(path.join(paths.skills, "spec_graph.dml"), await bundledAsset("spec_graph.dml")),
   ]);
   return paths;
 }

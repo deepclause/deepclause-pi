@@ -1,0 +1,10 @@
+% spec_query — deterministic capability inspector.
+% Usage: /dc-run spec_query <capability>     e.g. /dc-run spec_query ui/theme
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main(Capability) :-
+    sp_query(Capability, Report),
+    answer(Report).
+
+agent_main :-
+    answer("usage: /dc-run spec_query <capability>   e.g. ui/theme").

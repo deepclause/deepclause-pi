@@ -1,0 +1,7 @@
+% spec_status — deterministic spec/delta inventory.
+% Usage: /dc-run spec_status
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main :-
+    sp_status(Report),
+    answer(Report).

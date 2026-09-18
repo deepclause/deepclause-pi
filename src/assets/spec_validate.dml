@@ -1,0 +1,9 @@
+% spec_validate — deterministic spec/delta validation.
+% Usage: /dc-run spec_validate
+% Pure DML: no model calls, no runtime tools. Reports structural errors with
+% line numbers (3-hash scenarios, missing scenarios, duplicates).
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main :-
+    sp_check_all(Report),
+    answer(Report).

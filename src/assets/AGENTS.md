@@ -391,6 +391,39 @@ The tool extracts a deterministic Mermaid seed, has pi rewrite it in the chosen 
 
 Do not hand-write Mermaid for the user, and do not copy diagram tooling into the workspace. Regenerating a grade replaces only that grade's sidecar (`<name>.presentation.mmd` / `<name>.specification.mmd`).
 
+## Specs and deltas
+
+DeepClause keeps behaviour specs separate from executable plans:
+
+- `.pi/deepclause/specs/**/*.spec.md` — capability specs, the source of truth for behaviour.
+- `.pi/deepclause/changes/<slug>/specs/**/*.md` — change deltas.
+- `.pi/deepclause/lib/specs.dml` — the deterministic parser/validator used by the spec skills.
+- `.pi/deepclause/skills/spec_validate.dml`, `spec_status.dml`, `spec_query.dml`, `spec_graph.dml`.
+
+Specs are plain Markdown and must describe **behaviour only** — no commands, file paths,
+library choices, or implementation plans; those belong in `design.md` or `tasks.dml`.
+Structure:
+
+- `## Purpose`
+- `### Requirement: <name>` followed by prose using SHALL / MUST / SHOULD
+- `#### Scenario: <name>` with `- **WHEN**` and `- **THEN**` (exactly four hashes)
+
+Delta files wrap requirements in `## ADDED Requirements`, `## MODIFIED Requirements`,
+`## REMOVED Requirements`, or `## RENAMED Requirements`. `MODIFIED` carries the full
+replacement requirement.
+
+Validate and inspect without spending model tokens:
+
+- `/dc-check` — parse and validate every spec and delta; reports 3-hash scenarios, missing
+  scenarios and duplicates with line numbers.
+- `/dc-run spec_status` — capability and delta inventory.
+- `/dc-run spec_query <capability>` — one capability's requirements and scenarios.
+- `/dc-run spec_graph capabilities|changes` — deterministic Mermaid graph.
+- `dc_spec_graph` — pi tool that renders that graph in the diagram viewer.
+
+These skills are pure DML utilities: do not add model calls or runtime tools to them, and do
+not rewrite the parser by hand.
+
 ## Conservative editing rules
 
 When modifying an existing skill:

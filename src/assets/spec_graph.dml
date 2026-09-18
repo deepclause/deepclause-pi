@@ -1,0 +1,12 @@
+% spec_graph — deterministic Mermaid graphs of specs and changes.
+% Usage: /dc-run spec_graph [capabilities|changes]
+% Views: capabilities (default), changes.
+:- consult('.pi/deepclause/lib/specs.dml').
+
+agent_main :-
+    sp_graph(capabilities, Mermaid),
+    answer(Mermaid).
+
+agent_main(View) :-
+    sp_graph(View, Mermaid),
+    answer(Mermaid).
