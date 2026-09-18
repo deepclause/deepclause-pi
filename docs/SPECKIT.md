@@ -16,6 +16,16 @@ Spec-driven changes for pi, without leaving the session.
 /dc-archive <slug>                   merge into specs/
 ```
 
+## Why DML and DeepClause for spec-driven development
+
+Most spec tools are a Markdown convention plus a program that parses it. The convention is the good idea; the program is where it gets fragile, because parsing, validating and merging structured text is usually written as regexes and imperative branches. OpenSpec, for example, needs a few thousand lines of TypeScript for what is essentially parsing requirements, checking coverage, and reconciling deltas — and its own docs warn about silent failures such as a scenario written with three hashes instead of four.
+
+Spec work is logic. A requirement is a term; *every requirement has at least one scenario* is a rule; merging a delta is matching and rewriting; *which scenarios are uncovered?* and *do two in-flight changes touch the same requirement?* are queries. DML is a Prolog dialect, so these are expressed directly instead of emulated. Structure is parsed once into terms, so validation is a decision procedure with line numbers, merging preserves untouched blocks, and coverage and conflict checks are single queries — deterministic, zero tokens, reproducible in CI.
+
+That determinism is the point. The value of agreeing on a spec is that the agreement is *checkable*; if the check is another model call, it is just another opinion. DML lets the model do what it is good at — drafting requirements, designing, implementing — and keeps correctness in logic. The same runtime supplies what raw Prolog lacks: `task/N` and `prompt/N` for bounded model calls with typed results, `exec/2` for tools, streaming events, cancellation, and usage accounting. Backtracking across model calls is what makes verify → repair → retry loops natural, and CLP(FD)/(Q)/(R) cover hard constraints instead of asking the model to do arithmetic.
+
+DeepClause is what makes that practical inside pi: DML programs run with pi's active model, credentials, session context and approvals, so the spec engine, the task plan (`tasks.dml`), and the execution loop are one system in the session you already work in, rather than a separate CLI. You keep human-readable Markdown specs, but the thing enforcing them is a proof, not a prompt.
+
 ## Requirements
 
 - pi with this extension installed (see the [README](../README.md#install)).
