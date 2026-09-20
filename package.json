@@ -1,6 +1,6 @@
 {
   "name": "deepclause-pi",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pi-hosted runtime for DeepClause DML programs",
   "type": "module",
   "license": "MIT",

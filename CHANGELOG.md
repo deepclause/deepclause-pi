@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 - 2026-09-20
+
+- Add semantic judgment backends on top of `deepclause-sdk` 0.0.89: `llm` uses pi's active model and credentials, and `jev` (TypeSafe System One) is opt-in and calibrated.
+- Add a `judgment` block to `.pi/deepclause/config.json`: default backend, Jev model, and the API key environment variable.
+- Add `/dc-judge` to inspect, enable/disable, and select the backend; `/dc-run --judge=llm|jev` for per-run overrides; and report judge activity and usage in `/dc`.
+- Fix the spec library for the corrected meta-interpreter backtracking: replace cut-based parser predicates with if-then-else. The removed first-solution commit had masked the meta-interpreter's inability to honor `!` inside user predicates.
+- Rename `apply.dml`'s `verify/3` to `verify_task/3`, since the judge layer registers `verify/3` as a special predicate and shadowed it.
+- Jev is off by default; its API key is read only from the environment and never stored.
+
 ## 0.3.0 - 2026-09-18
 
 - Add **deepclause-pi speckit**: spec-driven changes on top of the pi runtime.
