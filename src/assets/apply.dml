@@ -85,7 +85,7 @@ attempt(TasksPath, Statuses0, Change, Id, Props, N, Max, Feedback, Statuses) :-
     format(string(Progress), "task ~w attempt ~w/~w", [Id, N, Max]),
     output(Progress),
     execute(Change, Id, Props, Feedback, Summary),
-    verify(Props, Summary, Verdict),
+    verify_task(Props, Summary, Verdict),
     (   Verdict = ok
     ->  sp_set_status(Statuses0, Id, done(N), Statuses),
         sp_write_statuses(TasksPath, Statuses),
@@ -123,7 +123,7 @@ build_instruction(Id, Do, Expected, Feedback, Instruction) :-
         "Task ~w. ~w~nExpected result: ~w~n~nThe previous attempt failed verification: ~w~nFix only what is needed; do not redo the whole task.",
         [Id, Do, Expected, Feedback]).
 
-verify(Props, Summary, Verdict) :-
+verify_task(Props, Summary, Verdict) :-
     catch(get_dict(checks, Props, Checks), _, Checks = []),
     findall(Message, (member(Check, Checks), run_check(Check, Message), Message \= ok), Failures),
     (   Summary == ""
