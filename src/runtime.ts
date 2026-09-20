@@ -1,8 +1,9 @@
 import { realpath, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createDeepClause } from "deepclause-sdk";
+import { createDeepClause, createJevJudgeBackend, createLLMJudgeBackend } from "deepclause-sdk";
 import type {
   DMLEvent,
+  JudgeBackend,
   LLMBackend,
   LLMBackendMessage,
   LLMUsage,
@@ -327,7 +328,7 @@ export async function executeDml(
   filePath: string,
   args: string[],
   initialMessages: MemoryMessage[],
-  config: DeepClauseConfig,
+  config: DeepClauseConfig & { judgeBackend?: string },
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   controller: AbortController,
@@ -339,12 +340,38 @@ export async function executeDml(
   const model = ctx.model;
   if (!model) throw new Error("Select a pi model before running DeepClause");
   const backend = createPiBackend(ctx, config.maxTokens, callbacks.onDiagnostic ?? (() => {}));
+
+  // Judgment backends. `llm` reuses pi's active model and credentials; `jev`
+  // is opt-in and only registered when enabled and its key is present.
+  const judgeBackends: Record<string, JudgeBackend> = {
+    llm: createLLMJudgeBackend({ llmBackend: backend, model: model.id }),
+  };
+  const jev = config.judgment.jev;
+  if (jev.enabled) {
+    const apiKey = process.env[jev.apiKeyEnv];
+    if (apiKey) {
+      judgeBackends.jev = createJevJudgeBackend({ apiKey, model: jev.model });
+    } else {
+      callbacks.onDiagnostic?.(
+        `judgment backend 'jev' is enabled but ${jev.apiKeyEnv} is not set; falling back to 'llm'`,
+      );
+    }
+  }
+  const requestedJudge = config.judgeBackend ?? config.judgment.default;
+  if (!judgeBackends[requestedJudge]) {
+    throw new Error(
+      `Judgment backend '${requestedJudge}' is not available. Enable it in .pi/deepclause/config.json or use --judge=llm.`,
+    );
+  }
+
   const sdk = await createDeepClause({
     model: model.id,
     maxTokens: config.maxTokens,
     streaming: true,
     debug: config.verbose,
     llmBackend: backend,
+    judgeBackends,
+    defaultJudge: requestedJudge,
   });
   registerPiRuntimeTools(
     sdk,
@@ -458,6 +485,7 @@ export async function executeDml(
       gasLimit: config.gasLimit,
       signal: controller.signal,
       initialMessages,
+      judgeBackend: config.judgeBackend,
       onUserInput: (prompt) => callbacks.onInput(prompt, controller.signal),
     })) {
       callbacks.onEvent(event);

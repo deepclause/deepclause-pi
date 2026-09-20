@@ -6,7 +6,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { DMLEvent } from "deepclause-sdk";
 import { Type } from "typebox";
 import { buildInitialMessages } from "./context.js";
-import { loadConfig, setModelToolEnabled, type ContextMode } from "./config.js";
+import { loadConfig, setModelToolEnabled, type ContextMode, type DeepClauseConfig } from "./config.js";
 import { renderDml, renderSequence } from "./diagram/extract.js";
 import { polishDiagram, resolveGrade, type DiagramGrade } from "./diagram/grade.js";
 import { findChrome, validateMermaid, type MermaidView } from "./diagram/validate.js";
@@ -57,6 +57,7 @@ export interface ParsedRun {
   contextMode?: ContextMode;
   verbose: boolean;
   debug: boolean;
+  judge?: string;
 }
 
 interface ParsedPlan {
@@ -125,11 +126,13 @@ export function parseRun(input: string): ParsedRun {
   let contextMode: ContextMode | undefined;
   let verbose = false;
   let debug = false;
+  let judge: string | undefined;
   const args: string[] = [];
 
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
     const contextValue = token.startsWith("--context=") ? token.slice("--context=".length) : undefined;
+    const judgeValue = token.startsWith("--judge=") ? token.slice("--judge=".length) : undefined;
     if (token === "--verbose" || token === "-v") {
       verbose = true;
     } else if (token === "--debug" || token === "-d") {
@@ -146,11 +149,18 @@ export function parseRun(input: string): ParsedRun {
         throw new Error("--context must be turn, branch, or isolated");
       }
       contextMode = value;
+    } else if (judgeValue !== undefined) {
+      if (!judgeValue.trim()) throw new Error("--judge requires a non-empty backend name");
+      judge = judgeValue.trim();
+    } else if (token === "--judge") {
+      const value = tokens[++index];
+      if (!value || !value.trim()) throw new Error("--judge requires a non-empty backend name");
+      judge = value.trim();
     } else {
       args.push(token);
     }
   }
-  return { target, args, contextMode, verbose, debug };
+  return { target, args, contextMode, verbose, debug, judge };
 }
 
 export function parsePlan(input: string): ParsedPlan {
@@ -286,6 +296,18 @@ async function listDmlFiles(directory: string, prefix = ""): Promise<string[]> {
 
 function modelLabel(ctx: ExtensionCommandContext): string {
   return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none selected";
+}
+
+function judgeBackendsEnabled(config: DeepClauseConfig): string {
+  return config.judgment.jev.enabled ? ", jev" : "";
+}
+
+function jevStatus(config: DeepClauseConfig): string {
+  const jev = config.judgment.jev;
+  if (!jev.enabled) return "disabled";
+  return process.env[jev.apiKeyEnv]
+    ? `enabled (${jev.model})`
+    : `enabled but ${jev.apiKeyEnv} is not set`;
 }
 
 async function bundledViewerTemplate(): Promise<string> {
@@ -926,6 +948,8 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         `Skills: ${path.relative(ctx.cwd, paths.skills)}`,
         `Plans: ${path.relative(ctx.cwd, paths.plans)}`,
         `Context: ${config.contextMode} (verbose default: ${config.verbose})`,
+        `Judgment: ${config.judgment.default} (backends: llm${judgeBackendsEnabled(config)})`,
+        `Jev: ${jevStatus(config)}`,
         `Model tool (${DC_RUN_TOOL}): ${config.modelToolEnabled && pi.getActiveTools().includes(DC_RUN_TOOL) ? "enabled" : "disabled"}`,
         `Model tool (${DC_DIAGRAM_TOOL}): ${pi.getActiveTools().includes(DC_DIAGRAM_TOOL) ? "enabled" : "disabled"}`,
         "Ask pi for a presentation-grade or specification-grade diagram of any .dml file;",
@@ -936,7 +960,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         "  /dc-check <change|spec>            validate specs and deltas deterministically",
         "  /dc-archive <change>              merge a change delta into specs/ and archive it",
         "  /dc-apply <change> [--abort]       execute tasks.dml; --abort discards an interrupted apply",
-        "  /dc-run <skill|path> [args] [--context=turn|branch|isolated]",
+        "  /dc-run <skill|path> [args] [--context=turn|branch|isolated] [--judge=llm|jev]",
         "  /dc-run <skill|path> --verbose   show lifecycle events",
         "  /dc-run <skill|path> --debug     show full event payloads and SDK diagnostics",
         "  /dc-tool enable|disable|status   control the model-callable dc_run tool",
@@ -1302,7 +1326,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             filePath,
             parsed.args,
             initialMessages,
-            { ...config, verbose: config.verbose || parsed.debug },
+            { ...config, verbose: config.verbose || parsed.debug, judgeBackend: parsed.judge },
             pi,
             ctx,
             controller,

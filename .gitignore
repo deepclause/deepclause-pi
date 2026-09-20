@@ -4,3 +4,5 @@ coverage/
 *.log
 .token
 .pi/
+
+.env

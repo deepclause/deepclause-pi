@@ -43,7 +43,7 @@
     "prepublishOnly": "npm run check"
   },
   "dependencies": {
-    "deepclause-sdk": "npm:deepclause-sdk@0.0.87",
+    "deepclause-sdk": "npm:deepclause-sdk@0.0.89",
     "typebox": "1.3.7"
   },
   "peerDependencies": {

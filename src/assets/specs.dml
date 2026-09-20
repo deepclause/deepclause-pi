@@ -64,9 +64,12 @@ sp_sections(Lines, Sections) :-
     sp_skip_plain(Lines, Rest),
     sp_sections_from(Rest, Sections).
 
-sp_skip_plain([line(Line, Number)|Rest], [line(Line, Number)|Rest]) :- sp_heading(Line, Level, _), Level >= 1, Level =< 3, !.
-sp_skip_plain([_|Rest], Out) :- sp_skip_plain(Rest, Out).
 sp_skip_plain([], []).
+sp_skip_plain([Item|Rest], Out) :-
+    (   Item = line(Line, _), sp_heading(Line, Level, _), Level >= 1, Level =< 3
+    ->  Out = [Item|Rest]
+    ;   sp_skip_plain(Rest, Out)
+    ).
 
 sp_sections_from([], []).
 sp_sections_from([line(Line, N)|Rest], [section(Level, Text, N, Body)|More]) :-
@@ -77,12 +80,11 @@ sp_sections_from([line(Line, N)|Rest], [section(Level, Text, N, Body)|More]) :-
     sp_sections_from(Tail, More).
 
 sp_take_body([], [], []).
-sp_take_body([line(Line, Number)|Rest], [], [line(Line, Number)|Rest]) :-
-    sp_heading(Line, Level, _),
-    Level >= 1,
-    Level =< 3,
-    !.
-sp_take_body([Item|Rest], [Item|Body], Tail) :- sp_take_body(Rest, Body, Tail).
+sp_take_body([Item|Rest], Body, Tail) :-
+    (   Item = line(Line, _), sp_heading(Line, Level, _), Level >= 1, Level =< 3
+    ->  Body = [], Tail = [Item|Rest]
+    ;   Body = [Item|Body1], sp_take_body(Rest, Body1, Tail)
+    ).
 
 %% Split a requirement body (level-4 headings inline) into description + scenarios.
 sp_split_scenarios(Body, DescLines, ScenarioSections) :-
@@ -90,11 +92,11 @@ sp_split_scenarios(Body, DescLines, ScenarioSections) :-
     sp_scenario_sections(Rest, ScenarioSections).
 
 sp_take_plain([], [], []).
-sp_take_plain([line(Line, Number)|Rest], [], [line(Line, Number)|Rest]) :-
-    sp_heading(Line, Level, _),
-    Level >= 4,
-    !.
-sp_take_plain([Item|Rest], [Item|Body], Tail) :- sp_take_plain(Rest, Body, Tail).
+sp_take_plain([Item|Rest], Body, Tail) :-
+    (   Item = line(Line, _), sp_heading(Line, Level, _), Level >= 4
+    ->  Body = [], Tail = [Item|Rest]
+    ;   Body = [Item|Body1], sp_take_plain(Rest, Body1, Tail)
+    ).
 
 sp_scenario_sections([], []).
 sp_scenario_sections([line(Line, N)|Rest], [section(4, Text, N, Body)|More]) :-
@@ -103,11 +105,11 @@ sp_scenario_sections([line(Line, N)|Rest], [section(4, Text, N, Body)|More]) :-
     sp_scenario_sections(Tail, More).
 
 sp_take_until_level4([], [], []).
-sp_take_until_level4([line(Line, Number)|Rest], [], [line(Line, Number)|Rest]) :-
-    sp_heading(Line, Level, _),
-    Level >= 4,
-    !.
-sp_take_until_level4([Item|Rest], [Item|Body], Tail) :- sp_take_until_level4(Rest, Body, Tail).
+sp_take_until_level4([Item|Rest], Body, Tail) :-
+    (   Item = line(Line, _), sp_heading(Line, Level, _), Level >= 4
+    ->  Body = [], Tail = [Item|Rest]
+    ;   Body = [Item|Body1], sp_take_until_level4(Rest, Body1, Tail)
+    ).
 
 %% ---------------------------------------------------------------------------
 %% Term extraction
@@ -164,10 +166,11 @@ sp_parse_delta(Text, Deltas) :-
     sp_collect_ops(Rest, Deltas).
 
 sp_drop_to_op([], []).
-sp_drop_to_op([section(2, Header, Number, Body)|Rest], [section(2, Header, Number, Body)|Rest]) :-
-    sp_delta_header(Header, _),
-    !.
-sp_drop_to_op([_|Rest], Out) :- sp_drop_to_op(Rest, Out).
+sp_drop_to_op([Item|Rest], Out) :-
+    (   Item = section(2, Header, _, _), sp_delta_header(Header, _)
+    ->  Out = [Item|Rest]
+    ;   sp_drop_to_op(Rest, Out)
+    ).
 
 sp_collect_ops([], []).
 sp_collect_ops([section(2, Header, _, _)|Rest], Deltas) :-
@@ -184,10 +187,11 @@ sp_collect_ops([section(2, Header, _, _)|Rest], Deltas) :-
     ).
 
 sp_take_until_op([], [], []).
-sp_take_until_op([section(2, Header, Number, Body)|Rest], [], [section(2, Header, Number, Body)|Rest]) :-
-    sp_delta_header(Header, _),
-    !.
-sp_take_until_op([Item|Rest], [Item|Group], Tail) :- sp_take_until_op(Rest, Group, Tail).
+sp_take_until_op([Item|Rest], Group, Tail) :-
+    (   Item = section(2, Header, _, _), sp_delta_header(Header, _)
+    ->  Group = [], Tail = [Item|Rest]
+    ;   Group = [Item|Group1], sp_take_until_op(Rest, Group1, Tail)
+    ).
 
 %% ---------------------------------------------------------------------------
 %% Validation

@@ -112,6 +112,23 @@ describe("DeepClause pi extension helpers", () => {
     expect(parseRun("example -v")).toMatchObject({ verbose: true, debug: false });
   });
 
+  it("parses the --judge backend override", () => {
+    expect(parseRun("example task --judge=jev")).toMatchObject({ judge: "jev" });
+    expect(parseRun("example --judge llm --verbose")).toMatchObject({ judge: "llm", verbose: true });
+    expect(() => parseRun("example --judge=")).toThrow("--judge requires a non-empty backend name");
+    expect(() => parseRun("example --judge")).toThrow("--judge requires a non-empty backend name");
+  });
+
+  it("reports judgment configuration in /dc", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "dc-judgment-status-"));
+    const harness = extensionHarness(dir);
+    await harness.commands.get("dc")!.handler("", harness.ctx);
+    const message = harness.notifications.at(-1) ?? "";
+    expect(message).toContain("Judgment: llm");
+    expect(message).toContain("Jev: disabled");
+    expect(message).toContain("--judge=llm|jev");
+  });
+
   it("parses contextual plan requests and filename overrides", () => {
     expect(parsePlan(`migrate the project to ESM --name="esm migration" --debug`)).toMatchObject({
       request: "migrate the project to ESM",
