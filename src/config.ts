@@ -128,3 +128,38 @@ export async function setModelToolEnabled(configPath: string, enabled: boolean):
   await writeFile(configPath, `${JSON.stringify({ ...existing, modelToolEnabled: enabled }, null, 2)}\n`, "utf8");
   return loadConfig(configPath);
 }
+
+export interface JudgeConfigPatch {
+  /** Default backend name ("llm" or "jev"). */
+  default?: string;
+  /** Partial update of the Jev backend settings. */
+  jev?: Partial<JevJudgeConfig>;
+}
+
+/** Merge a judgment patch into the workspace config, preserving every other field. */
+export async function setJudgeConfig(
+  configPath: string,
+  patch: JudgeConfigPatch,
+): Promise<DeepClauseConfig> {
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(configPath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Invalid DeepClause config: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const record = (value: unknown): Record<string, unknown> =>
+    value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+  const nextJudgment = {
+    ...record(existing.judgment),
+    ...(patch.default !== undefined ? { default: patch.default } : {}),
+    jev: { ...record(record(existing.judgment).jev), ...(patch.jev ?? {}) },
+  };
+
+  await writeFile(configPath, `${JSON.stringify({ ...existing, judgment: nextJudgment }, null, 2)}\n`, "utf8");
+  return loadConfig(configPath);
+}

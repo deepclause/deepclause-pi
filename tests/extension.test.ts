@@ -129,6 +129,25 @@ describe("DeepClause pi extension helpers", () => {
     expect(message).toContain("--judge=llm|jev");
   });
 
+  it("controls the judgment backend through /dc-judge", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "dc-judge-cmd-"));
+    const harness = extensionHarness(dir);
+
+    await harness.commands.get("dc-judge")!.handler("status", harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("judgment backend: llm");
+
+    await harness.commands.get("dc-judge")!.handler("enable", harness.ctx);
+    await harness.commands.get("dc-judge")!.handler("default jev", harness.ctx);
+    await harness.commands.get("dc-judge")!.handler("model jev-1.13.0", harness.ctx);
+
+    await harness.commands.get("dc-judge")!.handler("status", harness.ctx);
+    const status = harness.notifications.at(-1) ?? "";
+    expect(status).toContain("judgment backend: jev");
+    expect(status).toContain("registered backends: llm, jev");
+    expect(status).toContain("jev: enabled");
+    expect(status).toContain("model=jev-1.13.0");
+  });
+
   it("parses contextual plan requests and filename overrides", () => {
     expect(parsePlan(`migrate the project to ESM --name="esm migration" --debug`)).toMatchObject({
       request: "migrate the project to ESM",

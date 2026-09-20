@@ -6,7 +6,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { DMLEvent } from "deepclause-sdk";
 import { Type } from "typebox";
 import { buildInitialMessages } from "./context.js";
-import { loadConfig, setModelToolEnabled, type ContextMode, type DeepClauseConfig } from "./config.js";
+import { loadConfig, setJudgeConfig, setModelToolEnabled, type ContextMode, type DeepClauseConfig } from "./config.js";
 import { renderDml, renderSequence } from "./diagram/extract.js";
 import { polishDiagram, resolveGrade, type DiagramGrade } from "./diagram/grade.js";
 import { findChrome, validateMermaid, type MermaidView } from "./diagram/validate.js";
@@ -964,6 +964,9 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         "  /dc-run <skill|path> --verbose   show lifecycle events",
         "  /dc-run <skill|path> --debug     show full event payloads and SDK diagnostics",
         "  /dc-tool enable|disable|status   control the model-callable dc_run tool",
+        "  /dc-judge [enable|disable|status]  select the judgment backend (llm|jev)",
+        "  /dc-judge default llm|jev        set the default judgment backend",
+        "  /dc-judge model <name> | key-env <ENV_VAR>",
         "  /dc-cancel",
       ].join("\n");
       ctx.ui.notify(message, "info");
@@ -1052,6 +1055,78 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         const config = await loadConfig(paths.config);
         const active = config.modelToolEnabled && pi.getActiveTools().includes(DC_RUN_TOOL);
         ctx.ui.notify(`dc_run model tool: ${active ? "enabled" : "disabled"}`, "info");
+      }
+    },
+  });
+
+  pi.registerCommand("dc-judge", {
+    description: "Enable, disable, or select the semantic judgment backend (llm|jev)",
+    handler: async (rawArgs, ctx) => {
+      const tokens = rawArgs.trim().split(/\s+/).filter(Boolean);
+      const action = (tokens[0] ?? "status").toLowerCase();
+      const paths = await initializeWorkspace(ctx.cwd);
+
+      const describe = (config: DeepClauseConfig): string => {
+        const jev = config.judgment.jev;
+        const keyPresent = Boolean(process.env[jev.apiKeyEnv]);
+        return [
+          `judgment backend: ${config.judgment.default}`,
+          `registered backends: llm${jev.enabled ? ", jev" : ""}`,
+          `jev: ${jev.enabled ? "enabled" : "disabled"} | model=${jev.model} | ${jev.apiKeyEnv}=${keyPresent ? "set" : "not set"}`,
+        ].join("\n");
+      };
+
+      try {
+        if (action === "status") {
+          ctx.ui.notify(describe(await loadConfig(paths.config)), "info");
+          return;
+        }
+        if (action === "enable" || action === "on" || action === "disable" || action === "off") {
+          const enabled = action === "enable" || action === "on";
+          const config = await setJudgeConfig(paths.config, { jev: { enabled } });
+          const jev = config.judgment.jev;
+          const note = enabled && !process.env[jev.apiKeyEnv]
+            ? `\n${jev.apiKeyEnv} is not set; export it before using --judge=jev.`
+            : "";
+          ctx.ui.notify(`Jev backend ${enabled ? "enabled" : "disabled"} for this workspace.${note}`, enabled ? "warning" : "info");
+          return;
+        }
+        if (action === "default") {
+          const name = tokens[1];
+          if (name !== "llm" && name !== "jev") {
+            ctx.ui.notify("Usage: /dc-judge default llm|jev", "warning");
+            return;
+          }
+          await setJudgeConfig(paths.config, { default: name });
+          ctx.ui.notify(`Default judgment backend set to '${name}'`, "info");
+          return;
+        }
+        if (action === "model") {
+          const model = tokens[1];
+          if (!model) {
+            ctx.ui.notify("Usage: /dc-judge model <name>", "warning");
+            return;
+          }
+          await setJudgeConfig(paths.config, { jev: { model } });
+          ctx.ui.notify(`Jev model set to '${model}'`, "info");
+          return;
+        }
+        if (action === "key-env") {
+          const envName = tokens[1];
+          if (!envName) {
+            ctx.ui.notify("Usage: /dc-judge key-env <ENV_VAR>", "warning");
+            return;
+          }
+          await setJudgeConfig(paths.config, { jev: { apiKeyEnv: envName } });
+          ctx.ui.notify(`Jev API key environment variable set to '${envName}'`, "info");
+          return;
+        }
+        ctx.ui.notify(
+          "Usage: /dc-judge [enable|disable|status|default llm|jev|model <name>|key-env <ENV_VAR>]",
+          "warning",
+        );
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     },
   });

@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, loadConfig } from "../src/config.js";
+import { DEFAULT_CONFIG, loadConfig, setJudgeConfig } from "../src/config.js";
 
 async function load(value: unknown) {
   const dir = await mkdtemp(path.join(tmpdir(), "dc-config-"));
@@ -46,5 +46,35 @@ describe("judgment config", () => {
       "judgment.jev.apiKeyEnv",
     );
     await expect(load({ version: 1, judgment: [] })).rejects.toThrow("judgment must be a JSON object");
+  });
+
+  it("merges judgment updates without dropping other config", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "dc-config-merge-"));
+    const file = path.join(dir, "config.json");
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        contextMode: "branch",
+        judgment: {
+          default: "llm",
+          jev: { enabled: false, model: "jev-latest", apiKeyEnv: "TYPESAFE_API_KEY" },
+        },
+      }),
+      "utf8",
+    );
+
+    await setJudgeConfig(file, { jev: { enabled: true } });
+    await setJudgeConfig(file, { default: "jev" });
+    await setJudgeConfig(file, { jev: { model: "jev-1.13.0" } });
+
+    const config = await loadConfig(file);
+    expect(config.contextMode).toBe("branch");
+    expect(config.judgment.default).toBe("jev");
+    expect(config.judgment.jev).toEqual({
+      enabled: true,
+      model: "jev-1.13.0",
+      apiKeyEnv: "TYPESAFE_API_KEY",
+    });
   });
 });
