@@ -155,15 +155,15 @@ Give me a specification-grade diagram of src/report.dml
 
 Pi calls the always-active `dc_diagram` model tool, which:
 
-1. extracts a deterministic Mermaid seed from the DML in-process,
-2. has the active pi model rewrite it in the requested grade,
+1. extracts a deterministic Mermaid seed from the DML in-process (the specification seed adds a `LOGIC` section for decision predicates and a `RULES` section for fact tables),
+2. has the active pi model rewrite it in the requested grade, preserving the seed's conditions, thresholds and outcomes,
 3. validates each attempt (structural checks, plus the real Mermaid parser when Chrome is available),
 4. writes the sidecar under `.pi/deepclause/diagrams/`, rebuilds the self-contained offline `viewer.html`, and opens it.
 
 Grades:
 
-- **presentation** — about 8-12 nodes, plain language, headline numbers; for slides and overviews.
-- **specification** — function names, task/tool roles, post-conditions; for engineers.
+- **presentation** — about 8-12 nodes, plain language, headline numbers and the headline decision; for slides and overviews.
+- **specification** — function names, task/tool roles, post-conditions, plus the core decision logic: each decision predicate with its conditions, thresholds and outcomes, and the rule fact tables; for engineers.
 
 Selecting `both` produces both sidecars. The DML source may be anywhere (workspace-relative or absolute); only the generated viewer is confined to `.pi/deepclause/`. `dc_diagram` never executes the DML and needs no shell approval. Regenerating a grade replaces only that grade's sidecar (`<name>.presentation.mmd` / `<name>.specification.mmd`). The Mermaid bundle is vendored so the viewer works offline.
 

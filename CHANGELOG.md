@@ -7,6 +7,8 @@
 - Use the same synchronous execution claim for `/dc-run`, diagram generation, and the spec skills so no operation can overwrite another's active-run state.
 - Extend the `handbook-dml` skill and the bundled authoring guide with the semantic judgment predicates (`choose`, `rate`, `verify`, `probability`, `holds`, `judge`, `with_judgment`, `require_judgment`) and a decision framework: a bounded classifier, a calibrated probability gate, or a full `task/N` agent loop, whichever the core question actually needs.
 - Add an opt-in live test for the real calibrated Jev judge backend (`DEEPCLAUSE_LIVE_JEV=1 TYPESAFE_API_KEY=... npx vitest run tests/judge-live.test.ts`).
+- Enrich specification-grade diagrams with the core decision logic: a `LOGIC` section renders every reachable decision predicate with its conditions, thresholds and outcomes (including `verify`/`choose`/`probability` judgments and ordered guard chains), and a `RULES` section summarizes rule fact tables. The presentation seed stays small, and the grade prompts now require preserving domain rules while allowing arithmetic/date helpers to be grouped.
+- Fix a DML clause scanner bug where `/\s|$/` tested against a single character was always true, truncating clause bodies at the first decimal point (e.g. `P >= 0.75` became `P >= 0`).
 
 ## 0.4.0 - 2026-09-20
 

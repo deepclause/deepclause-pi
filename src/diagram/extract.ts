@@ -4,6 +4,8 @@
 
 export interface RenderOptions {
   hideOutput?: boolean;
+  /** Include core decision-logic blocks and rule facts. Defaults to true. */
+  includeLogic?: boolean;
 }
 
 interface Clause {
@@ -319,7 +321,7 @@ function extractClauses(src: string): ClauseMap {
       }
       if ("([{".includes(c)) depth++;
       else if (")]}".includes(c)) depth--;
-      else if (c === "." && depth === 0 && /\s|$/.test(src.charAt(b + 1))) break;
+      else if (c === "." && depth === 0 && (b + 1 >= src.length || /\s/.test(src.charAt(b + 1)))) break;
     }
     if (!clauses.has(name)) clauses.set(name, []);
     clauses.get(name)!.push({ args, body: hasBody ? src.slice(k, b) : "" });
@@ -373,6 +375,156 @@ function agenticPredicates(clauses: ClauseMap): Set<string> {
   };
   for (const n of clauses.keys()) visit(n, new Set());
   return agentic;
+}
+
+// ---------- core logic extraction --------------------------------------------
+
+const JUDGE_PREDICATES = new Set([
+  "judge", "choose", "rate", "verify", "probability", "holds", "with_judgment", "require_judgment",
+]);
+
+const MECHANICAL_HELPERS = new Set([
+  "dget", "get_dict", "num", "to_num", "present", "lower", "lower_string", "upper",
+  "state_text", "norm_sign", "as_list", "truthy", "falsy", "format", "trunc", "basename",
+]);
+
+const DECISION_RE = /(?:>=|=<|<|>|=:=|\bis\b|\bbetween\b|\bmod\b|\\\+)/;
+const AGGREGATE_RE = /\b(findall|forall|setof|bagof|aggregate_all|maplist)\b/;
+
+/** All `name(` tokens in a clause body, with strings and chars removed. */
+function headNamesIn(text: string): string[] {
+  const bare = text
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''");
+  const names: string[] = [];
+  for (const m of bare.matchAll(/([a-z][a-zA-Z0-9_]*)\s*\(/g)) {
+    if (m[1]) names.push(m[1]);
+  }
+  return names;
+}
+
+function predicateArity(clauses: Clause[]): number {
+  return splitTop(clauses[0]?.args ?? "", ",").filter(Boolean).length;
+}
+
+function isFactClauses(clauses: Clause[]): boolean {
+  return clauses.every((clause) => !clause.body.trim());
+}
+
+/**
+ * A predicate carries core logic when it branches, applies thresholds or
+ * generators, or consults a semantic judgment. Mechanical plumbing helpers are
+ * excluded so the logic section stays about decisions, not string handling.
+ */
+function isDecisionPredicate(name: string, clauses: Clause[]): boolean {
+  if (MECHANICAL_HELPERS.has(name)) return false;
+  if (clauses.length > 1) return true;
+  const body = clauses[0]?.body ?? "";
+  if (!body.trim()) return false;
+  if (DECISION_RE.test(body)) return true;
+  if (AGGREGATE_RE.test(body)) return true;
+  for (const h of headNamesIn(body)) if (JUDGE_PREDICATES.has(h)) return true;
+  return false;
+}
+
+const escLabel = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "'");
+
+/** Join the summaries of a conjunction/disjunction into one readable line. */
+function summarizeBody(text: string, max = 96): string {
+  const parts = splitGoals(text)
+    .map(({ goal }) => summarizeGoal(goal, max))
+    .filter(Boolean);
+  return [...new Set(parts)].slice(-2).join("; ");
+}
+
+/** One short, readable line for a single body goal. */
+function summarizeGoal(goal: string, max = 96): string {
+  const g = stripOuterParens(goal).trim();
+  if (!g) return "";
+  const br = parseArrow(g);
+  if (br) {
+    const then = summarizeBody(br.then, Math.max(24, max - 12));
+    const otherwise = br.else.trim() ? summarizeBody(br.else, Math.max(24, max - 12)) : "";
+    return `if ${trunc(br.cond.replace(/\s+/g, " "), max)} -> ${then || "…"}${otherwise ? ` ; else: ${otherwise}` : ""}`;
+  }
+  return summarizeSingle(g, max);
+}
+
+function summarizeSingle(g: string, max: number): string {
+  const h = headName(g);
+  if (!h) return trunc(g.replace(/\s+/g, " "), max);
+  if (["format", "write", "print", "output", "answer"].includes(h)) {
+    const s = firstString(g);
+    if (!s) return `${h}(...)`;
+    const decision = /(?:decision|answer|verdict|conclusion):.*/i.exec(s);
+    return trunc(decision ? decision[0] : s, Math.max(max, 120));
+  }
+  if (JUDGE_PREDICATES.has(h)) {
+    const label = h === "require_judgment" ? "require calibrated" : h;
+    const s = firstString(g);
+    return s ? `${label}: ${trunc(s, Math.max(16, max - label.length - 2))}` : `${label}(...)`;
+  }
+  if (["findall", "forall", "setof", "bagof", "aggregate_all"].includes(h)) return `${h}(...)`;
+  const args = (): string[] => splitTop(g.slice(g.indexOf("(") + 1, g.lastIndexOf(")")), ",").map((p) => p.trim());
+  if (h === "get_dict") return args()[0] || "get_dict";
+  if (h === "dget" || h === "num" || h === "to_num") return args()[1] || h;
+  const inside = g.slice(g.indexOf("(") + 1, g.lastIndexOf(")")).replace(/\s+/g, " ").trim();
+  return inside ? `${h}(${trunc(inside, Math.max(12, max - h.length - 3))})` : h;
+}
+
+/** Render one clause as an escaped `<br/>`-joined list of its meaningful goals. */
+function describeClause(clause: Clause): string {
+  if (!clause.body.trim()) return escLabel(trunc(clause.args.replace(/\s+/g, " "), 80));
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const { goal } of splitGoals(clause.body)) {
+    const line = summarizeGoal(goal);
+    if (!line) continue;
+    const escaped = escLabel(line);
+    if (seen.has(escaped)) continue;
+    seen.add(escaped);
+    lines.push(escaped);
+  }
+  return lines.join("<br/>");
+}
+
+function factSummary(name: string, clauses: Clause[]): string {
+  const sample = clauses
+    .slice(0, 6)
+    .map((clause) => escLabel(trunc(clause.args.replace(/\s+/g, " "), 32)))
+    .join(" · ");
+  return `${name}/${predicateArity(clauses)} — ${clauses.length} facts: ${sample}${clauses.length > 6 ? " …" : ""}`;
+}
+
+interface LogicExtraction {
+  logic: Map<string, Clause[]>;
+  facts: Map<string, Clause[]>;
+}
+
+/** Transitive closure of decision predicates and fact tables reachable from the flow. */
+function collectLogic(clauses: ClauseMap, roots: Iterable<string>): LogicExtraction {
+  const logic = new Map<string, Clause[]>();
+  const facts = new Map<string, Clause[]>();
+  const seen = new Set<string>();
+  const visit = (name: string): void => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const bodies = clauses.get(name);
+    if (!bodies) return;
+    if (isFactClauses(bodies)) {
+      if (bodies.length >= 2) facts.set(name, bodies);
+      return;
+    }
+    if (isDecisionPredicate(name, bodies)) logic.set(name, bodies);
+    for (const clause of bodies) {
+      for (const inner of headNamesIn(clause.body)) {
+        if (inner !== name && clauses.has(inner) && !BUILTIN.has(inner)) visit(inner);
+      }
+    }
+  };
+  for (const root of roots) visit(root);
+  return { logic, facts };
 }
 
 // ---------- rendering --------------------------------------------------------
@@ -460,6 +612,9 @@ interface RenderState {
   stack: string[];
   sawAnswer: boolean;
   phaseOpen: boolean;
+  includeLogic: boolean;
+  logicNodes: Map<string, string[]>;
+  factRefs: Set<string>;
 }
 
 export function renderDml(file: string, src: string, opts: RenderOptions = {}): string {
@@ -474,6 +629,9 @@ export function renderDml(file: string, src: string, opts: RenderOptions = {}): 
     stack: [],
     sawAnswer: false,
     phaseOpen: false,
+    includeLogic: opts.includeLogic !== false,
+    logicNodes: new Map(),
+    factRefs: new Set(),
   };
   const nid = () => `n${++state.n}`;
   const node = (shape: [string, string], label: string, klass: string): string => {
@@ -483,6 +641,22 @@ export function renderDml(file: string, src: string, opts: RenderOptions = {}): 
   };
   const edge = (a: string, b: string, label?: string) =>
     state.lines.push(`  ${a} ${label ? `-->|${label}|` : "-->"} ${b}`);
+
+  /** Record user predicates referenced by a condition so their logic still gets a block. */
+  const registerLogicRefs = (text: string, nodeId: string): void => {
+    for (const name of headNamesIn(text)) {
+      const bodies = clauses.get(name);
+      if (!bodies || BUILTIN.has(name) || name === "agent_main") continue;
+      if (isFactClauses(bodies)) {
+        if (bodies.length >= 2) state.factRefs.add(name);
+        continue;
+      }
+      if (agentic.has(name)) continue;
+      const referenced = state.logicNodes.get(name) ?? [];
+      referenced.push(nodeId);
+      state.logicNodes.set(name, referenced);
+    }
+  };
 
   function renderGoals(goals: Goal[], ctx = "", topLevel = false): Segment {
     let entry: string | null = null;
@@ -519,6 +693,7 @@ export function renderDml(file: string, src: string, opts: RenderOptions = {}): 
     const br = parseArrow(goal);
     if (br) {
       const d = node(["{", "}"], `if ${trunc(br.cond, 46)}`, "det");
+      if (state.includeLogic) registerLogicRefs(br.cond, d);
       const t = renderGoals(splitGoals(br.then), ctx);
       const e = br.else.trim() ? renderGoals(splitGoals(br.else), ctx) : null;
       const merge = nid();
@@ -557,14 +732,24 @@ export function renderDml(file: string, src: string, opts: RenderOptions = {}): 
     if (h && clauses.has(h)) {
       const bodies = clauses.get(h)!;
       const isFact = bodies.every((c) => !c.body.trim());
-      if (isFact) return null;
+      if (isFact) {
+        if (bodies.length >= 2) state.factRefs.add(h);
+        return null;
+      }
       if (agentic.has(h) && !state.stack.includes(h)) {
         state.stack.push(h);
         const seg = renderGoals(splitGoals(bodies[0]?.body ?? ""), h);
         state.stack.pop();
         return seg.entry ? seg : null;
       }
-      return { entry: node(["[[", "]]"], `${h}()`, "det"), exit: null };
+      const label = state.includeLogic ? `${h}/${predicateArity(bodies)}` : `${h}()`;
+      const id = node(["[[", "]]"], label, "det");
+      if (state.includeLogic) {
+        const referenced = state.logicNodes.get(h) ?? [];
+        referenced.push(id);
+        state.logicNodes.set(h, referenced);
+      }
+      return { entry: id, exit: null };
     }
     return null;
   }
@@ -588,6 +773,43 @@ export function renderDml(file: string, src: string, opts: RenderOptions = {}): 
     tools.forEach((t, i) => state.lines.push(`    tool${i}[["${t.name}(${trunc(t.args, 26)})"]]:::tool`));
     state.lines.push("  end");
   }
+
+  if (state.includeLogic) {
+    const { logic, facts } = collectLogic(clauses, [...state.logicNodes.keys(), ...state.factRefs]);
+    if (logic.size || facts.size) {
+      const edges: string[] = [];
+      if (logic.size) {
+        state.lines.push('  subgraph LOGIC["core decision logic"]');
+        state.lines.push("    direction TB");
+        let index = 0;
+        for (const [name, bodies] of logic) {
+          const sg = `lg${++index}`;
+          state.lines.push(`    subgraph ${sg}["${name}/${predicateArity(bodies)}"]`);
+          state.lines.push("      direction TB");
+          bodies.forEach((clause, ci) => {
+            const description = describeClause(clause) || "(clause)";
+            state.lines.push(`      ${sg}c${ci}["${ci + 1}) ${description}"]:::det`);
+          });
+          state.lines.push("    end");
+          for (const nodeId of state.logicNodes.get(name) ?? []) {
+            edges.push(`  ${nodeId} -.->|"core logic"| ${sg}`);
+          }
+        }
+        state.lines.push("  end");
+      }
+      if (facts.size) {
+        state.lines.push('  subgraph RULES["rule facts"]');
+        state.lines.push("    direction LR");
+        let index = 0;
+        for (const [name, bodies] of facts) {
+          state.lines.push(`    rf${++index}["${factSummary(name, bodies)}"]:::det`);
+        }
+        state.lines.push("  end");
+      }
+      state.lines.push(...edges);
+    }
+  }
+
   state.lines.push(
     "  classDef start fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;",
     "  classDef terminal fill:#e3f2fd,stroke:#1565c0;",

@@ -690,11 +690,11 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
       pi.registerTool({
         name: DC_DIAGRAM_TOOL,
         label: "Create DeepClause Diagram",
-        description: "Create a presentation-grade or specification-grade Mermaid diagram from any .dml file, write a self-contained offline viewer under .pi/deepclause/diagrams/, and open it.",
+        description: "Create a presentation-grade or specification-grade Mermaid diagram from any .dml file, write a self-contained offline viewer under .pi/deepclause/diagrams/, and open it. The specification grade preserves the core decision logic and rule facts.",
         promptSnippet: "Create a presentation- or specification-grade diagram from a DML file",
         promptGuidelines: [
           "Use dc_diagram whenever the user asks for a diagram, flowchart, or visual of a .dml file; pass the exact path the user named.",
-          "Choose grade=presentation for slides and overviews and grade=specification for engineering detail; use grade=both only when the user asks for both.",
+          "Choose grade=presentation for slides and overviews and grade=specification for engineering detail (decision predicates, thresholds, rule facts); use grade=both only when the user asks for both.",
           "Do not hand-write Mermaid or run diagram tools yourself; call dc_diagram and report the viewer result.",
         ],
         parameters: Type.Object({
@@ -730,9 +730,6 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             const config = await loadConfig(getPaths(ctx.cwd).config);
             const source = await readFile(sourcePath, "utf8");
             const display = displayPath(ctx.cwd, sourcePath);
-            const seed = view === "sequence"
-              ? renderSequence(display, source)
-              : renderDml(display, source, { hideOutput: true });
             const targets = await collectDiagramTargets(ctx.cwd, [sourcePath]);
             const name = diagramNameFor(sourcePath, targets, ctx.cwd);
             const { diagrams, vendor } = await ensureDiagramDir(ctx.cwd, viewerVendorAssetPath());
@@ -745,6 +742,12 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             let chromeResolved = false;
 
             for (const grade of grades) {
+              // The specification seed carries the core decision logic and rule
+              // facts; the presentation seed stays small so the model can keep
+              // it to a general-audience overview.
+              const seed = view === "sequence"
+                ? renderSequence(display, source)
+                : renderDml(display, source, { hideOutput: true, includeLogic: grade === "specification" });
               const result = await polishDiagram({
                 grade,
                 view,

@@ -4,13 +4,13 @@ export type DiagramGrade = "presentation" | "specification";
 export type RequestedGrade = DiagramGrade | "both";
 
 export const GRADE_SYSTEM_PROMPT =
-  "You are a meticulous Mermaid v11 diagram editor. You output only valid Mermaid source, never wrapped in code fences, and you keep all facts accurate.";
+  "You are a meticulous Mermaid v11 diagram editor. You output only valid Mermaid source, never wrapped in code fences, and you keep all facts and decision logic accurate. Never invent or drop a rule, threshold, or outcome.";
 
 export const GRADE_PROMPTS: Record<DiagramGrade, string> = {
   presentation:
-    "Produce a PRESENTATION-GRADE version: about 8-12 nodes, plain non-technical language, NO function names or framework jargon, highlight the headline numbers and the main steps, and add 1-2 short callouts. Keep it accurate but simple enough for a general audience.",
+    "Produce a PRESENTATION-GRADE version: about 8-12 nodes, plain non-technical language, NO function names or framework jargon, highlight the headline numbers, the main steps and the headline decision, and add 1-2 short callouts. Keep it accurate but simple enough for a general audience; you may compress the detailed logic but must not change the final decision or omit a rule that flips it.",
   specification:
-    "Produce a SPECIFICATION-GRADE (detailed engineering) version: keep the technical detail (function names, task/tool roles, post-conditions, seed data), but improve labels, grouping and readability so an engineer can follow it precisely.",
+    "Produce a SPECIFICATION-GRADE (detailed engineering) version: keep the technical detail (function names, task/tool roles, post-conditions, seed data) AND the domain decision logic. Preserve the decision predicates from the seed's `LOGIC` section — each with its exact conditions, thresholds and outcomes — and every `RULES` fact table. You may group or collapse pure arithmetic, date and formatting helpers, but never drop or alter a domain rule, threshold or outcome. Expand each retained logic block from the DML source. Improve labels, grouping and readability so an engineer can trace every domain decision precisely.",
 };
 
 /**
@@ -38,7 +38,7 @@ function buildPrompt(grade: DiagramGrade, view: MermaidView, source: string, see
   return [
     GRADE_PROMPTS[grade],
     "",
-    `Rules: output ONLY Mermaid v11 source (no code fences); keep it a '${syntax}' diagram; keep the facts accurate; do not use reserved words such as 'end' as node ids or class names.`,
+    `Rules: output ONLY Mermaid v11 source (no code fences); keep it a '${syntax}' diagram; keep the facts and decision logic accurate; preserve the seed's domain LOGIC blocks (conditions, thresholds, outcomes) and RULES facts instead of collapsing them into generic nodes, while grouping pure arithmetic/date/format helpers; do not use reserved words such as 'end' as node ids or class names.`,
     "",
     "DML source:",
     source,

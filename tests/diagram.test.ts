@@ -16,6 +16,32 @@ const VENDOR = fileURLToPath(new URL("../src/assets/vendor/mermaid.min.js", impo
 
 const VALID_FLOW = "flowchart TD\n  n1([\"start\"]):::start --> n2[\"tool/2 capabilities\"]:::det\n  classDef start fill:#e8f5e9;";
 
+const LOGIC_DML = `
+danger_keyword("bleed", "Bleeding vaginally").
+danger_keyword("fever", "Fever").
+
+risk(Signs, urgent) :-
+    member(Item, Signs),
+    danger_keyword(Item, _),
+    !.
+risk(_, routine).
+
+band(P, high) :- P >= 0.75.
+band(P, low) :- P < 0.75.
+
+assess(Request, P) :-
+    probability(Request, "What is the probability of urgent referral?", P).
+
+agent_main(Request) :-
+    task("Extract the danger signs. Store them in Signs.", list(string(Signs))),
+    assess(Request, P),
+    band(P, Band),
+    (   risk(Signs, urgent)
+    ->  answer("refer")
+    ;   answer("proceed")
+    ).
+`;
+
 function extensionHarness(cwd: string) {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const eventHandlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
@@ -101,6 +127,26 @@ describe("diagram extractor", () => {
     const sequence = renderSequence("example.dml", EXAMPLE_DML);
     expect(sequence).toContain("sequenceDiagram");
     expect(sequence).toContain("actor U as User");
+  });
+
+  it("captures decision predicates, thresholds, judgments and rule facts", () => {
+    const graph = renderDml("logic.dml", LOGIC_DML, { hideOutput: true });
+    expect(graph).toContain("subgraph LOGIC");
+    expect(graph).toContain("risk/2");
+    expect(graph).toContain("band/2");
+    expect(graph).toContain("0.75");
+    expect(graph).toContain("probability:");
+    expect(graph).toContain("subgraph RULES");
+    expect(graph).toContain("danger_keyword/2");
+    expect(graph).toContain("2 facts");
+    expect(structuralCheck(graph, "flow").ok).toBe(true);
+  });
+
+  it("keeps the presentation seed free of the logic blocks", () => {
+    const graph = renderDml("logic.dml", LOGIC_DML, { hideOutput: true, includeLogic: false });
+    expect(graph).not.toContain("subgraph LOGIC");
+    expect(graph).not.toContain("subgraph RULES");
+    expect(structuralCheck(graph, "flow").ok).toBe(true);
   });
 });
 

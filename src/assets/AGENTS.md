@@ -424,10 +424,10 @@ Pi can turn any DML file into a self-contained, offline Mermaid viewer. Ask for 
 
 Pi calls the `dc_diagram` model tool with the DML path and a grade:
 
-- **presentation** — about 8-12 nodes, plain language, headline numbers (slides and overviews).
-- **specification** — function names, task/tool roles, post-conditions (engineers).
+- **presentation** — about 8-12 nodes, plain language, headline numbers and the headline decision (slides and overviews).
+- **specification** — function names, task/tool roles, post-conditions, plus the core decision logic: each decision predicate with its conditions, thresholds and outcomes, and the rule fact tables (engineers).
 
-The tool extracts a deterministic Mermaid seed, has pi rewrite it in the chosen grade, validates the result, writes the viewer under `.pi/deepclause/diagrams/`, and opens it. The DML file may live anywhere (workspace-relative or absolute); only the generated viewer stays under `.pi/deepclause/`.
+The tool extracts a deterministic Mermaid seed, enriches the specification seed with a `LOGIC` section (decision predicates, guards, thresholds, judgments) and a `RULES` section (fact tables), has pi rewrite it in the chosen grade, validates the result, writes the viewer under `.pi/deepclause/diagrams/`, and opens it. The DML file may live anywhere (workspace-relative or absolute); only the generated viewer stays under `.pi/deepclause/`.
 
 Do not hand-write Mermaid for the user, and do not copy diagram tooling into the workspace. Regenerating a grade replaces only that grade's sidecar (`<name>.presentation.mmd` / `<name>.specification.mmd`).
 
