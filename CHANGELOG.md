@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-09-22
 
 - Fix parallel `dc_run` calls racing past the concurrency guard: the execution slot is now claimed synchronously before any await, so simultaneous model tool calls are rejected cleanly instead of running concurrently and clobbering pi's single input dialog.
 - Show the full DeepClause question plus the running skill in the pi input dialog title. Pi's input component ignores the placeholder, so the previous `ctx.ui.input("DeepClause input", prompt)` call never displayed the question.
