@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createDeepClause } from "deepclause-sdk";
 import type { LLMBackend } from "deepclause-sdk";
 import { buildInitialMessages } from "../src/context.js";
-import deepClauseExtension, { parsePlan, parseRun, splitArguments } from "../src/index.js";
+import deepClauseExtension, { parsePlan, parseRun, requestDeepClauseInput, splitArguments } from "../src/index.js";
 import { registerPiRuntimeTools } from "../src/runtime.js";
 import { EXAMPLE_DML, initializeWorkspace, resolveDmlPath } from "../src/workspace.js";
 import { assemblePlanDml, readPlanRequiredTools, validateGeneratedPlan, validatePlanSpec, type PlanningSnapshot } from "../src/planner.js";
@@ -540,6 +540,46 @@ agent_main :- answer("Cancelled fallback").
     expect(second.details).toMatchObject({ success: false, error: "execution_already_active" });
     releaseExec({ stdout: "", stderr: "", code: 0, killed: false });
     expect((await first).content[0].text).toBe("continued");
+  });
+
+  it("rejects a dc_run that starts in the same tick as another before its setup awaits", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "deepclause-pi-tool-race-"));
+    const harness = extensionHarness(cwd);
+    await harness.commands.get("dc-tool")?.handler("enable", harness.ctx);
+    const paths = await initializeWorkspace(cwd);
+    await writeFile(path.join(paths.skills, "instant.dml"), 'agent_main :- answer("ok").\n', "utf8");
+
+    const tool = harness.tools.get("dc_run");
+    // Both calls are initiated before the first reaches its first await, so the
+    // claim must happen synchronously or both would race into the runtime and
+    // fight over the single-slot pi input dialog.
+    const first = tool.execute("call-1", { skill: "instant" }, new AbortController().signal, undefined, harness.ctx);
+    const second = await tool.execute("call-2", { skill: "instant" }, new AbortController().signal, undefined, harness.ctx);
+    expect(second.details).toMatchObject({ success: false, error: "execution_already_active" });
+    expect((await first).content[0].text).toBe("ok");
+  });
+
+  it("shows the DeepClause question and run label in the input dialog title", async () => {
+    const calls: Array<{ title: string; placeholder?: string }> = [];
+    const ctx = {
+      ui: {
+        async input(title: string, placeholder?: string) {
+          calls.push({ title, placeholder });
+          return "confirmed";
+        },
+      },
+    };
+    const result = await requestDeepClauseInput(
+      ctx as any,
+      "skills/who-anc/anc_quick_check.dml",
+      "Confirm this extracted case: age 24, 34 weeks?",
+      new AbortController().signal,
+    );
+    expect(result).toBe("confirmed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].title).toContain("Confirm this extracted case: age 24, 34 weeks?");
+    expect(calls[0].title).toContain("skills/who-anc/anc_quick_check.dml");
+    expect(calls[0].placeholder).toBeUndefined();
   });
 
   it("rejects traversal and symlink escapes", async () => {

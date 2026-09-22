@@ -111,14 +111,50 @@ A task can bind up to four outputs. Keep each task focused even though the runti
 
 ### `prompt/N`: an isolated model call
 
-Use `prompt/N` for a subtask that should not inherit accumulated conversation memory: independent classification, adversarial review, or formatting based only on explicitly supplied text.
+Use `prompt/N` for a subtask that should not inherit accumulated conversation memory: adversarial review, rewriting, or formatting based only on explicitly supplied text. For a bounded classification, prefer the judgment predicates below.
 
 ```prolog
-prompt("Classify this text as low, medium, or high risk: {Text}. Store the label in Risk.",
-       string(Risk)).
+prompt("Rewrite this summary in plain language for a patient: {Text}. Store only the rewrite in Plain.",
+       string(Plain)).
 ```
 
 Fresh context is not a security boundary. Untrusted text can still contain hostile instructions; delimit it, state how it may be used, and request narrow structured output.
+
+### Semantic judgments: bounded, typed questions
+
+Use the judgment predicates when the core question is a **bounded, typed question about explicit state**. They are not agentic: they do not read or write DML memory, they cannot call tools, and their answers are constrained to the options or levels you supply. That makes them cheaper and more reliable than a `task/N` for classification, rating, verification, and probability gates.
+
+| Core question | Predicate |
+| --- | --- |
+| "Which label/route?" from a closed set | `choose(State, Question, Options, Choice)` |
+| "How severe/frustrated/confident?" on an ordered scale | `rate(State, Question, Levels, Level)` |
+| "Is X true?" (`yes`/`no`/`unknown`) | `verify(State, Question, Truth)`; `holds(State, Question)` for a semidet check |
+| "How likely is X?" / "Is it above a threshold?" | `probability(State, Question, P)`; `holds(State, Question, Threshold)` |
+
+Batch several questions into one request with `judge/2`:
+
+```prolog
+judge(Message, [
+    choose("Which team should handle this?", [billing, orders, account]) - Team,
+    verify("Does the message ask for a refund?") - Refund
+]).
+```
+
+Gate a calibrated probability and fall back when the backend only estimates:
+
+```prolog
+risk_band(Text, Band) :-
+    require_judgment(calibrated, probability(Text, "Risk of harm?", P)),
+    ( P >= 0.8 -> Band = high ; Band = low ).
+risk_band(Text, Band) :-
+    choose(Text, "Is the risk high or low?", [high, low], Band).
+```
+
+`with_judgment(Backend, Goal)` selects a backend per scope; `require_judgment/2` fails before the judgment runs when the backend lacks a capability such as `calibrated`, so the second clause is the fallback. Answers are memoized per run by backend, model, state, and questions, so backtracking is cheap.
+
+Do not name your own predicates `choose/4`, `rate/4`, `verify/3`, `probability/3`, `holds/2`, `holds/3`, `judge/2`, `with_judgment/2`, or `require_judgment/2`; they are runtime special predicates. `verify` is three-valued — never treat `\+ verify(...)` as "the model said no".
+
+See `DML_REFERENCE.md` for the full syntax, options, and capability list.
 
 ### `llm/2`: low-level completion
 
@@ -357,7 +393,7 @@ Represent stable facts and rules as Prolog clauses; expose narrow query/update t
 
 ### 6. Independent reviewers
 
-Use `task/N` to draft and `prompt/N` to review from fresh context, then apply deterministic acceptance criteria. Best for code review, risk assessment, and editorial checks.
+Use `task/N` to draft and `prompt/N` to review from fresh context, then apply deterministic acceptance criteria. Best for code review, risk assessment, and editorial checks. When the review is a bounded checklist ("does it state the referral threshold?"), use `verify/3` or `holds/2` instead of a free-form reviewer.
 
 ### 7. Pure deterministic utility
 

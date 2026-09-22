@@ -322,6 +322,24 @@ function publishResult(pi: ExtensionAPI, content: string, details: Record<string
   pi.sendMessage({ customType: "deepclause-result", content, display: true, details });
 }
 
+/**
+ * Ask the user a DeepClause question.
+ *
+ * Pi's interactive text-input dialog renders only its title: the placeholder
+ * argument is ignored by `ExtensionInputComponent`. Passing the question as the
+ * placeholder (as the extension used to) made it invisible, so put the whole
+ * question in the title and label which run is asking.
+ */
+export function requestDeepClauseInput(
+  ctx: Pick<ExtensionContext, "ui">,
+  label: string,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  const heading = label ? `DeepClause input — ${label}` : "DeepClause input";
+  return ctx.ui.input(`${heading}\n\n${prompt}`, undefined, { signal });
+}
+
 export default function deepClauseExtension(pi: ExtensionAPI) {
   let activeController: AbortController | undefined;
   let activeDescription: string | undefined;
@@ -331,6 +349,27 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
   let planCommitRegistered = false;
   let planningTransaction: PlanningTransaction | undefined;
   let pendingAgentStep: PendingAgentStep | undefined;
+
+  /**
+   * Claim the single DeepClause execution slot synchronously, before any await.
+   * Without this, parallel `dc_run` calls all pass the `activeController` check
+   * while the first one is still awaiting its setup, then run concurrently and
+   * fight over the one-slot pi input dialog (leaving earlier runs hung).
+   */
+  const claimExecution = (description: string): AbortController | undefined => {
+    if (activeController) return undefined;
+    const controller = new AbortController();
+    activeController = controller;
+    activeDescription = description;
+    return controller;
+  };
+
+  const releaseExecution = (controller: AbortController): void => {
+    if (activeController === controller) {
+      activeController = undefined;
+      activeDescription = undefined;
+    }
+  };
 
   const setPlanCommitActive = (enabled: boolean) => {
     if (enabled && !planCommitRegistered) {
@@ -528,6 +567,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         promptGuidelines: [
           "Use dc_run only for existing DML programs when their deterministic logic, constraints, or specialized orchestration is useful; do not use dc_run to compile natural language or create a skill.",
           "Do not call dc_run while another DeepClause execution is active, and do not claim success unless dc_run returns an answer without errors.",
+          "If dc_run reports execution_already_active, wait for the active run to finish and then retry this skill instead of reporting failure.",
         ],
         parameters: Type.Object({
           skill: Type.String({ description: "Skill name such as example, or a DML path relative to .pi/deepclause/." }),
@@ -537,46 +577,45 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
           })),
         }),
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
-          if (activeController) {
+          const controller = claimExecution("dc_run");
+          if (!controller) {
             return {
-              content: [{ type: "text", text: "DeepClause execution rejected: another execution is already active." }],
+              content: [{ type: "text", text: "DeepClause execution rejected: another execution is active. Wait for it to finish, then call dc_run again for this skill." }],
               details: { success: false, error: "execution_already_active" },
             };
           }
-
-          const paths = await initializeWorkspace(ctx.cwd);
-          const config = await loadConfig(paths.config);
-          if (!config.modelToolEnabled || !pi.getActiveTools().includes(DC_RUN_TOOL)) {
-            return {
-              content: [{ type: "text", text: "The dc_run tool is disabled. The user can enable it with /dc-tool enable." }],
-              details: { success: false, error: "tool_disabled" },
-            };
-          }
-
-          const mode = params.context ?? config.contextMode;
-          const filePath = await resolveDmlPath(paths, params.skill);
-          if (await isContextualPlan(filePath)) {
-            return {
-              content: [{ type: "text", text: "Contextual DML plans must be started by the user with /dc-run; they cannot start a nested pi agent turn from dc_run." }],
-              details: { success: false, error: "interactive_plan_requires_user_run" },
-            };
-          }
-          const skillName = path.relative(paths.root, filePath);
-          const initialMessages = buildInitialMessages(
-            ctx.sessionManager.getBranch(),
-            mode,
-            config.branchMessageLimit,
-          );
-          const controller = new AbortController();
           const cancel = () => controller.abort(signal?.reason ?? new Error("dc_run cancelled"));
           if (signal?.aborted) cancel();
           else signal?.addEventListener("abort", cancel, { once: true });
-          activeController = controller;
-          activeDescription = `model tool running ${skillName}`;
-          const startedAt = Date.now();
-          const progress: string[] = [];
 
           try {
+            const paths = await initializeWorkspace(ctx.cwd);
+            const config = await loadConfig(paths.config);
+            if (!config.modelToolEnabled || !pi.getActiveTools().includes(DC_RUN_TOOL)) {
+              return {
+                content: [{ type: "text", text: "The dc_run tool is disabled. The user can enable it with /dc-tool enable." }],
+                details: { success: false, error: "tool_disabled" },
+              };
+            }
+
+            const mode = params.context ?? config.contextMode;
+            const filePath = await resolveDmlPath(paths, params.skill);
+            if (await isContextualPlan(filePath)) {
+              return {
+                content: [{ type: "text", text: "Contextual DML plans must be started by the user with /dc-run; they cannot start a nested pi agent turn from dc_run." }],
+                details: { success: false, error: "interactive_plan_requires_user_run" },
+              };
+            }
+            const skillName = path.relative(paths.root, filePath);
+            activeDescription = `model tool running ${skillName}`;
+            const initialMessages = buildInitialMessages(
+              ctx.sessionManager.getBranch(),
+              mode,
+              config.branchMessageLimit,
+            );
+            const startedAt = Date.now();
+            const progress: string[] = [];
+
             const result = await executeDml(
               filePath,
               params.args ?? [],
@@ -600,7 +639,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
                 onDiagnostic: () => {},
                 onInput: async (prompt, inputSignal) => {
                   if (!ctx.hasUI) throw new Error("dc_run cannot request user input without interactive UI");
-                  const answer = await ctx.ui.input("DeepClause input", prompt, { signal: inputSignal });
+                  const answer = await requestDeepClauseInput(ctx, skillName, prompt, inputSignal);
                   if (answer === undefined) throw new Error("Input cancelled");
                   return answer;
                 },
@@ -626,12 +665,11 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             const message = error instanceof Error ? error.message : String(error);
             return {
               content: [{ type: "text", text: `DeepClause execution failed: ${message}` }],
-              details: { success: false, skill: skillName, contextMode: mode, error: message },
+              details: { success: false, error: message },
             };
           } finally {
             signal?.removeEventListener("abort", cancel);
-            activeController = undefined;
-            activeDescription = undefined;
+            releaseExecution(controller);
           }
         },
       });
@@ -665,54 +703,47 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
           view: Type.Optional(StringEnum(["flow", "sequence"] as const, { description: "Base layout used to seed the grade; default flow." })),
         }),
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
-          if (activeController) {
+          const controller = claimExecution("dc_diagram");
+          if (!controller) {
             return {
               content: [{ type: "text", text: "Another DeepClause operation is already active; wait for it to finish." }],
               details: { success: false, error: "execution_already_active" },
             };
           }
-
-          const requested = resolveGrade(String(params.grade ?? "")) ?? "presentation";
-          const grades: DiagramGrade[] = requested === "both" ? ["presentation", "specification"] : [requested];
-          const view: MermaidView = params.view === "sequence" ? "sequence" : "flow";
-
-          let sourcePath: string;
-          try {
-            sourcePath = await resolveDiagramSource(ctx.cwd, params.dml);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { content: [{ type: "text", text: `dc_diagram failed: ${message}` }], details: { success: false, error: message } };
-          }
-          if (!ctx.model) {
-            return {
-              content: [{ type: "text", text: "dc_diagram requires an active pi model. Select one and try again." }],
-              details: { success: false, error: "no_model" },
-            };
-          }
-
-          const config = await loadConfig(getPaths(ctx.cwd).config);
-          const source = await readFile(sourcePath, "utf8");
-          const display = displayPath(ctx.cwd, sourcePath);
-          const seed = view === "sequence"
-            ? renderSequence(display, source)
-            : renderDml(display, source, { hideOutput: true });
-          const targets = await collectDiagramTargets(ctx.cwd, [sourcePath]);
-          const name = diagramNameFor(sourcePath, targets, ctx.cwd);
-          const { diagrams, vendor } = await ensureDiagramDir(ctx.cwd, viewerVendorAssetPath());
-          const templateText = await bundledViewerTemplate();
-
-          const controller = new AbortController();
           const cancel = () => controller.abort(signal?.reason ?? new Error("dc_diagram cancelled"));
           if (signal?.aborted) cancel();
           else signal?.addEventListener("abort", cancel, { once: true });
-          activeController = controller;
-          activeDescription = `diagram ${name} (${grades.join("+")})`;
-
-          const run = (command: string, args: string[], options?: { timeout?: number }) => pi.exec(command, args, options);
-          let chrome: string | undefined;
-          let chromeResolved = false;
 
           try {
+            const requested = resolveGrade(String(params.grade ?? "")) ?? "presentation";
+            const grades: DiagramGrade[] = requested === "both" ? ["presentation", "specification"] : [requested];
+            const view: MermaidView = params.view === "sequence" ? "sequence" : "flow";
+
+            const sourcePath = await resolveDiagramSource(ctx.cwd, params.dml);
+            if (!ctx.model) {
+              return {
+                content: [{ type: "text", text: "dc_diagram requires an active pi model. Select one and try again." }],
+                details: { success: false, error: "no_model" },
+              };
+            }
+
+            const config = await loadConfig(getPaths(ctx.cwd).config);
+            const source = await readFile(sourcePath, "utf8");
+            const display = displayPath(ctx.cwd, sourcePath);
+            const seed = view === "sequence"
+              ? renderSequence(display, source)
+              : renderDml(display, source, { hideOutput: true });
+            const targets = await collectDiagramTargets(ctx.cwd, [sourcePath]);
+            const name = diagramNameFor(sourcePath, targets, ctx.cwd);
+            const { diagrams, vendor } = await ensureDiagramDir(ctx.cwd, viewerVendorAssetPath());
+            const templateText = await bundledViewerTemplate();
+
+            activeDescription = `diagram ${name} (${grades.join("+")})`;
+
+            const run = (command: string, args: string[], options?: { timeout?: number }) => pi.exec(command, args, options);
+            let chrome: string | undefined;
+            let chromeResolved = false;
+
             for (const grade of grades) {
               const result = await polishDiagram({
                 grade,
@@ -758,8 +789,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
             return { content: [{ type: "text", text: `dc_diagram failed: ${message}` }], details: { success: false, error: message } };
           } finally {
             signal?.removeEventListener("abort", cancel);
-            activeController = undefined;
-            activeDescription = undefined;
+            releaseExecution(controller);
           }
         },
       });
@@ -833,13 +863,12 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
     args: string[] = [],
     options: { verifyCommands?: string[]; piAgentStep?: boolean; changeJsonPath?: string } = {},
   ): Promise<string> => {
-    const paths = await initializeWorkspace(ctx.cwd);
-    const config = await loadConfig(paths.config);
-    const filePath = await resolveDmlPath(paths, skill);
-    const controller = new AbortController();
-    activeController = controller;
-    activeDescription = `running ${skill}`;
+    const controller = claimExecution(`running ${skill}`);
+    if (!controller) throw new Error("Another DeepClause execution is already active");
     try {
+      const paths = await initializeWorkspace(ctx.cwd);
+      const config = await loadConfig(paths.config);
+      const filePath = await resolveDmlPath(paths, skill);
       const result = await executeDml(
         filePath,
         args,
@@ -859,8 +888,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
       if (result.errors.length) throw new Error(result.errors.join("\n"));
       return result.answer ?? "(no answer)";
     } finally {
-      activeController = undefined;
-      activeDescription = undefined;
+      releaseExecution(controller);
     }
   };
 
@@ -1287,8 +1315,8 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
   pi.registerCommand("dc-run", {
     description: "Run a DML skill with pi's active model",
     handler: async (rawArgs, ctx) => {
-
-      if (activeController) {
+      const controller = claimExecution("dc-run");
+      if (!controller) {
         ctx.ui.notify("A DeepClause execution is already active", "warning");
         return;
       }
@@ -1329,8 +1357,6 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
           mode,
           config.branchMessageLimit,
         );
-        const controller = new AbortController();
-        activeController = controller;
         const outputLines: string[] = [];
         const recentEvents: string[] = [];
         const events: Array<Record<string, unknown>> = [];
@@ -1409,7 +1435,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
               onEvent,
               onDiagnostic,
               onInput: async (prompt, signal) => {
-                const answer = await ctx.ui.input("DeepClause input", prompt, { signal });
+                const answer = await requestDeepClauseInput(ctx, skillName, prompt, signal);
                 if (answer === undefined) throw new Error("Input cancelled");
                 return answer;
               },
@@ -1437,8 +1463,7 @@ export default function deepClauseExtension(pi: ExtensionAPI) {
         publishResult(pi, `DeepClause execution failed: ${message}`, { error: message });
         ctx.ui.notify(message, activeController?.signal.aborted ? "warning" : "error");
       } finally {
-        activeController = undefined;
-        activeDescription = undefined;
+        releaseExecution(controller);
         ctx.ui.setStatus(STATUS_KEY, undefined);
         ctx.ui.setWidget(WIDGET_KEY, undefined);
       }

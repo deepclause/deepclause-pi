@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fix parallel `dc_run` calls racing past the concurrency guard: the execution slot is now claimed synchronously before any await, so simultaneous model tool calls are rejected cleanly instead of running concurrently and clobbering pi's single input dialog.
+- Show the full DeepClause question plus the running skill in the pi input dialog title. Pi's input component ignores the placeholder, so the previous `ctx.ui.input("DeepClause input", prompt)` call never displayed the question.
+- Use the same synchronous execution claim for `/dc-run`, diagram generation, and the spec skills so no operation can overwrite another's active-run state.
+- Extend the `handbook-dml` skill and the bundled authoring guide with the semantic judgment predicates (`choose`, `rate`, `verify`, `probability`, `holds`, `judge`, `with_judgment`, `require_judgment`) and a decision framework: a bounded classifier, a calibrated probability gate, or a full `task/N` agent loop, whichever the core question actually needs.
+- Add an opt-in live test for the real calibrated Jev judge backend (`DEEPCLAUSE_LIVE_JEV=1 TYPESAFE_API_KEY=... npx vitest run tests/judge-live.test.ts`).
+
 ## 0.4.0 - 2026-09-20
 
 - Add semantic judgment backends on top of `deepclause-sdk` 0.0.89: `llm` uses pi's active model and credentials, and `jev` (TypeSafe System One) is opt-in and calibrated.
